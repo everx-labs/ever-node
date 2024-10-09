@@ -11,7 +11,6 @@
 * limitations under the License.
 */
 
-use super::{BlockCandidate, McData};
 use crate::{
     block::BlockStuff, engine_traits::EngineOperations, error::NodeError,
     shard_state::ShardStateStuff,
@@ -24,7 +23,10 @@ use crate::{
         supported_version, supported_capabilities, calc_remp_msg_ordering_hash,
         UNREGISTERED_CHAIN_MAX_LEN, fmt_next_block_descr,
     },
-    validator::{out_msg_queue::MsgQueueManager, validator_utils::calc_subset_for_masterchain},
+    validator::{
+        out_msg_queue::MsgQueueManager, validator_utils::calc_subset_for_masterchain,
+        BlockCandidate, McData
+    },
     CHECK,
 };
 use crate::validator::verification::VerificationManagerPtr;
@@ -51,8 +53,7 @@ use ever_executor::{
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
-        Arc,
+        atomic::{AtomicU32, AtomicU64, Ordering}, Arc,
     },
 };
 
@@ -4619,6 +4620,20 @@ impl ValidateQuery {
         Ok(base)
     }
 
+    /// returns error message in Option if validation could not be determined
+    pub async fn try_verify(self) -> Result<Option<String>> {
+        match self.try_validate().await {
+            Err(err) => {
+                if let Some(NodeError::Timeout(_)) = err.downcast_ref() {
+                    Ok(Some(err.to_string()))
+                } else {
+                    Err(err)
+                }
+            }
+            Ok(()) => Ok(None)
+        }
+    }
+
     pub async fn try_validate(mut self) -> Result<()> {
         let block_id = self.block_candidate.block_id.clone();
         log::trace!("({}): VALIDATE {}", self.next_block_descr, block_id);
@@ -4626,11 +4641,19 @@ impl ValidateQuery {
 
         let result = self.validate().await;
         let duration = now.elapsed().as_millis() as u64;
-        let base = result.map_err(|e| {
-            log::warn!("({}): VALIDATION FAILED {} TIME {}ms ERR {}", self.next_block_descr, block_id, duration, e);
-            e
-        })?;
-
+        let base = match result {
+            Err(err) => {
+                let add = if let Some(NodeError::Timeout(_)) = err.downcast_ref() {
+                    "(skipped) "
+                } else {
+                    ""
+                };
+                log::warn!("({}): VALIDATION FAILED {}{} TIME {}ms ERR {}",
+                    self.next_block_descr, add, block_id, duration, err);
+                return Err(err);
+            }
+            Ok(base) => base
+        };
         let gas_used = base.gas_used.load(Ordering::Relaxed);
         let ratio = gas_used.checked_div(duration).unwrap_or(gas_used);
         log::info!("({}): ASYNC VALIDATED {} TIME {}ms GAS_RATE: {}", self.next_block_descr, base.block_id(), duration, ratio);

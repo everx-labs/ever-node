@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.60.2
+
+- Added severity for validate query
+
+## Version 0.60.1
+
+- Fixed too frequent logging of cells db's telemetry
+
 ## Version 0.60.0
 
 - Cells db performance optimization. Added new 6th version of node database, migration performs automatically on startup.

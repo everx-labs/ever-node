@@ -28,10 +28,10 @@ strum_macros = '0.18.0'
 thiserror = '1.0'
 tokio = { features = [ 'fs', 'rt-multi-thread' ], version = '1.5' }
 tokio-util = '0.7'
-adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.11.25' }
-ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.11.17' }
+adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.11.27' }
+ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.11.19' }
 lockfree = { git = 'https://github.com/everx-labs/lockfree.git' }
-ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.4.24' }
+ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.4.26' }
 
 [build-dependencies]
 cc = { features = [ 'parallel' ], version = '1.0.61' }

@@ -752,7 +752,8 @@ impl CollatorTestBundle {
         engine: &Arc<dyn EngineOperations>,
     ) -> Result<Self> {
 
-        log::info!("Building for validating block, candidate: {}", candidate.block_id);
+        let block = BlockStuff::deserialize_block_checked(candidate.block_id.clone(), candidate.data.clone())?;
+        log::info!("Building for validating block, candidate: {}", block.id());
 
         // TODO: fill caches states
         let mut cached_states = CachedStates::new(engine);
@@ -791,7 +792,6 @@ impl CollatorTestBundle {
         //
         let mut neighbors = vec!();
         let shards = if shard.is_masterchain() {
-            let block = BlockStuff::deserialize_block_checked(candidate.block_id.clone(), candidate.data.clone())?;
             block.shard_hashes()?
         } else {
             mc_state.shard_hashes()?
@@ -862,10 +862,8 @@ impl CollatorTestBundle {
             mc_states.push(handle.id().clone());
         }
 
-        let b = BlockStuff::deserialize_block_checked(candidate.block_id.clone(), candidate.data.clone())?;
-
         let index = CollatorTestBundleIndex {
-            id: candidate.block_id.clone(),
+            id: block.id().clone(),
             top_shard_blocks: top_shard_blocks.iter().map(|tsb| tsb.proof_for().clone()).collect(),
             external_messages: external_messages.iter().map(|(_, id)| id.clone()).collect(),
             last_mc_state: last_mc_id,
@@ -875,7 +873,7 @@ impl CollatorTestBundle {
             prev_blocks: prev_blocks_ids,
             created_by: candidate.created_by.clone(),
             rand_seed: None,
-            now_ms: b.block()?.read_info()?.gen_utime_ms(),
+            now_ms: block.block()?.read_info()?.gen_utime_ms(),
             fake: true,
             contains_ethalon: false,
             contains_candidate: true,

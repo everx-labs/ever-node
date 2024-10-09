@@ -22,9 +22,9 @@ use super::validator_utils::{
 use crate::{
     collator_test_bundle::CollatorTestBundle,
     engine_traits::{EngineOperations, RempQueueCollatorInterface},
-    validating_utils::{fmt_next_block_descr},
+    validating_utils::fmt_next_block_descr,
     validator::{
-        CollatorSettings, validate_query::ValidateQuery, collator, 
+        BlockCandidate, CollatorSettings, validate_query::ValidateQuery, collator,
     }
 };
 use crate::validator::verification::VerificationManagerPtr;
@@ -35,26 +35,24 @@ use crate::validator::validator_utils::PrevBlockHistory;
 
 #[allow(dead_code)]
 pub async fn run_validate_query_any_candidate(
-    block: super::BlockCandidate,
+    block_candidate: BlockCandidate,
     engine: Arc<dyn EngineOperations>,
 ) -> Result<SystemTime> {
-    let real_block = Block::construct_from_bytes(&block.data)?;
-    let shard = block.block_id.shard().clone();
+    let real_block = Block::construct_from_bytes(&block_candidate.data)?;
     let info = real_block.read_info()?;
-    let prev = PrevBlockHistory::new_prevs(&shard, &info.read_prev_ids()?);
+    let prev_blocks_ids = info.read_prev_ids()?;
     let (_, master_ref) = info.read_master_id()?.master_block_id();
     let mc_state = engine.load_state(&master_ref).await?;
-    let min_masterchain_block_id = mc_state.find_block_id(info.min_ref_mc_seqno())?;
-    let mut cc_seqno_with_delta = 0;
     let mc_state_extra = mc_state.shard_state_extra()?;
-    let cc_seqno_from_state = if shard.is_masterchain() {
+    let mut cc_seqno_with_delta = 0;
+    let cc_seqno_from_state = if info.shard().is_masterchain() {
         mc_state_extra.validator_info.catchain_seqno
     } else {
-        mc_state_extra.shards.calc_shard_cc_seqno(&shard)?
+        mc_state_extra.shards.calc_shard_cc_seqno(info.shard())?
     };
     let nodes = crate::validator::validator_utils::compute_validator_set_cc(
         &mc_state,
-        &shard,
+        info.shard(),
         engine.now(),
         cc_seqno_from_state,
         &mut cc_seqno_with_delta
@@ -65,18 +63,42 @@ pub async fn run_validate_query_any_candidate(
         target: "verificator", 
         "ValidatorSetForVerification cc_seqno: {:?}", validator_set.cc_seqno()
     );
-    run_validate_query(
-        shard,
-        SystemTime::now(),
-        min_masterchain_block_id,
-        &prev,
-        block,
+
+    let labels = [("shard", info.shard().to_string())];
+    #[cfg(not(feature = "statsd"))]
+    metrics::increment_gauge!("run_validators", 1.0 ,&labels);
+
+    let query = ValidateQuery::new(
+        info.shard().clone(),
+        info.min_ref_mc_seqno(),
+        prev_blocks_ids,
+        block_candidate,
         validator_set,
-        engine,
-        SystemTime::now(),
+        engine.clone(),
+        false,
+        true,
         None, //no verification manager for validations within verification
         true,
-    ).await
+    );
+    let validator_result = query.try_verify().await;
+
+    #[cfg(not(feature = "statsd"))]
+    metrics::decrement_gauge!("run_validators", 1.0, &labels);
+
+    match validator_result {
+        Ok(_) => {
+            metrics::increment_counter!("successful_validations", &labels);
+            Ok(SystemTime::now())
+        }
+        Err(e) =>  {
+            metrics::increment_counter!("failed_validations", &labels);
+
+            #[cfg(feature = "telemetry")]
+            engine.validator_telemetry().failed_attempt(info.shard(), &e.to_string());
+
+            Err(e)
+        }
+    }
 }
 
 pub async fn run_validate_query(
@@ -84,7 +106,7 @@ pub async fn run_validate_query(
     _min_ts: SystemTime,
     min_masterchain_block_id: BlockIdExt,
     prev: &PrevBlockHistory,
-    block: super::BlockCandidate,
+    block: BlockCandidate,
     set: ValidatorSet,
     engine: Arc<dyn EngineOperations>,
     _timeout: SystemTime,

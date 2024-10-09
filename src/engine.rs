@@ -2977,6 +2977,9 @@ fn telemetry_logger(engine: Arc<Engine>) {
         let millis = 500;
         loop {
             tokio::time::sleep(Duration::from_millis(millis)).await;
+
+            // update metrics
+
             engine.engine_telemetry.storage.file_entries.update(
                 engine.engine_allocated.storage.file_entries.load(Ordering::Relaxed)
             );    
@@ -3015,40 +3018,8 @@ fn telemetry_logger(engine: Arc<Engine>) {
             engine.engine_telemetry.validator_sets.update(
                 engine.engine_allocated.validator_sets.load(Ordering::Relaxed)
             );        
-            engine.telemetry_printer.try_print();
 
-            let cells_loaded_from_db = engine.engine_telemetry.storage.cells_loaded_from_db.load(Ordering::Relaxed);
-            log::info!(target: "telemetry", "{:<39} {:^37}", 
-                "NODE total cells loaded from db",
-                cells_loaded_from_db
-            );
-            let cells_loaded_from_cache = engine.engine_telemetry.storage.cells_loaded_from_cache.load(Ordering::Relaxed);
-            log::info!(target: "telemetry", "{:<39} {:^37}", 
-                "NODE total cells loaded from cache",
-                cells_loaded_from_cache
-            );
-            if cells_loaded_from_cache + cells_loaded_from_db > 0 {
-                log::info!(target: "telemetry", "{:<39} {:^37}", 
-                    "NODE cells cache hit ratio %",
-                    (cells_loaded_from_cache * 100) / (cells_loaded_from_cache + cells_loaded_from_db)
-                );
-            }
-            let counters_loaded_from_db = engine.engine_telemetry.storage.counters_loaded_from_db.load(Ordering::Relaxed);
-            log::info!(target: "telemetry", "{:<39} {:^37}", 
-                "NODE total counters loaded from db",
-                counters_loaded_from_db
-            );
-            let counters_loaded_from_cache = engine.engine_telemetry.storage.counters_loaded_from_cache.load(Ordering::Relaxed);
-            log::info!(target: "telemetry", "{:<39} {:^37}", 
-                "NODE total counters loaded from cache",
-                counters_loaded_from_cache
-            );
-            if counters_loaded_from_cache + counters_loaded_from_db > 0 {
-                log::info!(target: "telemetry", "{:<39} {:^37}", 
-                    "NODE counters cache hit ratio %",
-                    (counters_loaded_from_cache * 100) / (counters_loaded_from_cache + counters_loaded_from_db)
-                );
-            }
+            // check timeout
 
             elapsed += millis;
             if elapsed < Engine::TIMEOUT_TELEMETRY_SEC * 1000 {
@@ -3056,6 +3027,44 @@ fn telemetry_logger(engine: Arc<Engine>) {
             } else {
                 elapsed = 0
             }
+
+            // print telemetry
+
+            engine.telemetry_printer.try_print();
+
+            let cells_loaded_from_db = engine.engine_telemetry.storage.cells_loaded_from_db.load(Ordering::Relaxed);
+            log::debug!(target: "telemetry", "{:<39} {:^37}", 
+                "NODE total cells loaded from db",
+                cells_loaded_from_db
+            );
+            let cells_loaded_from_cache = engine.engine_telemetry.storage.cells_loaded_from_cache.load(Ordering::Relaxed);
+            log::debug!(target: "telemetry", "{:<39} {:^37}", 
+                "NODE total cells loaded from cache",
+                cells_loaded_from_cache
+            );
+            if cells_loaded_from_cache + cells_loaded_from_db > 0 {
+                log::debug!(target: "telemetry", "{:<39} {:^37}", 
+                    "NODE cells cache hit ratio %",
+                    (cells_loaded_from_cache * 100) / (cells_loaded_from_cache + cells_loaded_from_db)
+                );
+            }
+            let counters_loaded_from_db = engine.engine_telemetry.storage.counters_loaded_from_db.load(Ordering::Relaxed);
+            log::debug!(target: "telemetry", "{:<39} {:^37}", 
+                "NODE total counters loaded from db",
+                counters_loaded_from_db
+            );
+            let counters_loaded_from_cache = engine.engine_telemetry.storage.counters_loaded_from_cache.load(Ordering::Relaxed);
+            log::debug!(target: "telemetry", "{:<39} {:^37}", 
+                "NODE total counters loaded from cache",
+                counters_loaded_from_cache
+            );
+            if counters_loaded_from_cache + counters_loaded_from_db > 0 {
+                log::debug!(target: "telemetry", "{:<39} {:^37}", 
+                    "NODE counters cache hit ratio %",
+                    (counters_loaded_from_cache * 100) / (counters_loaded_from_cache + counters_loaded_from_db)
+                );
+            }
+
             let period = crate::full_node::telemetry::TPS_PERIOD_1;
             let tps_1 = engine.tps_counter.calc_tps(period)
                 .unwrap_or_else(|e| { 
