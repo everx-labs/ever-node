@@ -818,6 +818,7 @@ impl TestEngine {
             true,
             true,
             None,
+            true,
         );
         validator_query.try_validate().await?;
     

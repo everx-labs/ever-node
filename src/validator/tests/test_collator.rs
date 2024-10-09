@@ -105,6 +105,7 @@ async fn try_collate_by_engine(
         true,
         true,
         None,
+        true,
     );
     validator_query.try_validate().await?;
     Ok((new_block, new_state))
