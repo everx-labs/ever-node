@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.60.3
+
+- Fix serialization cache for SMFT block status
+- Turned off REMP Absent check reaction (SMFT issue)
+- Exclude REMP from SMFT verifications
+- Increase package version
+
 ## Version 0.60.2
 
 - Added severity for validate query
