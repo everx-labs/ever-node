@@ -1667,7 +1667,7 @@ impl ValidatorManagerImpl {
 
         if verification::DEBUG_NACK_APPEARENCE {
             use rand::Rng;
-            if rand::thread_rng().gen_range(0, 100) < 20 {
+            if rand::thread_rng().gen_range(0..100) < 20 {
                 log::warn!(target: "verificator", "Block {:?} verification error: random error", candidate_id);
                 return false;
             }

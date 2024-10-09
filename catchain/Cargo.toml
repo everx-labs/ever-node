@@ -18,10 +18,10 @@ quanta = '0.11'
 rand = '0.8'
 regex = '1.10'
 tokio = { features = [ 'rt-multi-thread' ], version = '1.40' }
-adnl = { features = [ 'node' ], git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.11.27' }
+adnl = { features = [ 'node' ], git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.11.28' }
 ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.11.19' }
 storage = { path = '../storage' }
-ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.4.26' }
+ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.4.27' }
 
 [dev-dependencies]
 env_logger = '0.11'
