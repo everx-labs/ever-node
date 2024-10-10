@@ -16,10 +16,9 @@ use adnl::{
 };
 use ever_abi::{Contract, Token, TokenValue, Uint};
 use ever_block::{
-    error, fail, Account, AccountStatus, base64_decode, base64_encode, BlockIdExt, BuilderData,
+    error, fail, AccountStatus, base64_decode, base64_encode, BlockIdExt, BuilderData,
     Deserializable, Ed25519KeyOption, Result, Serializable, ShardAccount, SliceData, 
-    UInt256, write_boc, MsgAddressInt, StateInit, ShardAccounts, Cell, ShardIdent,
-    Block, BlockInfo,
+    UInt256, write_boc, ShardIdent
 };
 use ever_block_json::parse_state;
 use std::{
@@ -451,6 +450,7 @@ impl <Q: ToString> SendReceive<Q> for GetBlock {
             fail!("block not found!")
         }
 
+        params.next();
         let boc_name = params.next()
             .map_or_else(|| format!("block_boc_{:x}.boc", data.id().root_hash()), |s| s.to_string());
 
@@ -1201,17 +1201,11 @@ async fn main() {
 mod test {
     
     use super::*;
-    use rand::{Rng, SeedableRng};
-    use std::{
-        cmp::min, fs, path::Path, sync::{Arc, atomic::{AtomicU64, Ordering}},
-        time::{Duration, Instant}, thread
-    };
-    use serde_json::json;
-    use storage::block_handle_db::BlockHandle;
-    use tokio::io::AsyncWriteExt;
-    use ton_api::deserialize_boxed;
     use ever_block::{
-        generate_test_account_by_init_code_hash, BlockLimits, ConfigParam0, ConfigParam34, ConfigParamEnum, CurrencyCollection, HashmapAugType, McStateExtra, ParamLimits, ShardIdent, ShardStateUnsplit, ValidatorDescr, ValidatorSet
+        Account, Block, BlockInfo, BlockLimits, Cell, ConfigParam0, ConfigParam34,
+        ConfigParamEnum, CurrencyCollection, generate_test_account_by_init_code_hash,
+        HashmapAugType, McStateExtra, MsgAddressInt, ParamLimits, ShardAccounts,
+        ShardIdent, ShardStateUnsplit, StateInit, ValidatorDescr, ValidatorSet
     };
     use ever_node::{
         block::BlockKind, collator_test_bundle::create_engine_allocated,
@@ -1225,6 +1219,15 @@ mod test {
     use ever_node::engine_traits::EngineTelemetry;
     #[cfg(feature = "telemetry")]
     use ever_node::collator_test_bundle::create_engine_telemetry;
+
+    use rand::{Rng, SeedableRng};
+    use std::{
+        cmp::min, fs, path::Path, sync::{Arc, atomic::{AtomicU64, Ordering}},
+        time::{Duration, Instant}, thread
+    };
+    use storage::block_handle_db::BlockHandle;
+    use tokio::io::AsyncWriteExt;
+    use ton_api::deserialize_boxed;
 
     const CFG_DIR: &str = "./target";
     const CFG_NODE_FILE: &str = "light_node.json";
@@ -1837,10 +1840,11 @@ mod test {
         engine.stop().await;
         drop(engine);
         loop {
-            if fs::remove_dir_all(DB_PATH).is_ok() {
+            let ok = fs::remove_dir_all(DB_PATH).is_ok();
+            thread::sleep(Duration::from_millis(10));
+            if ok {
                 break
             }
-            thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -1861,13 +1865,13 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_getblock() {
-        let cmd = "getblock 17";
+        let cmd = "getblock 17 ./target/17.boc";
         test_one_cmd(cmd, |result| {
             assert_eq!(result.len(), 344);
             let block = Block::construct_from_bytes(&result).unwrap();
             assert_eq!(block.read_info().unwrap().seq_no(), 17);
         }).await;
-        let cmd = "getblock 19";
+        let cmd = "getblock 19 ./target/19.boc";
         test_one_cmd(cmd, |result| {
             assert_eq!(result.len(), 344);
             let block = Block::construct_from_bytes(&result).unwrap();
@@ -2151,27 +2155,27 @@ mod test {
     fn test_stats_to_json() {
         let mut stats = [OneStat { key: "key".to_string(), value: String::new()}];
         let value = stats_to_json(stats.iter());
-        let ethalon = json!({"key": "null"});
+        let ethalon = serde_json::json!({"key": "null"});
         assert_eq!(ethalon, value);
 
         stats[0].value = "12345".into();
         let value = stats_to_json(stats.iter());
-        let ethalon = json!({"key": 12345});
+        let ethalon = serde_json::json!({"key": 12345});
         assert_eq!(ethalon, value);
 
         stats[0].value = "\"Some text\"".into();
         let value = stats_to_json(stats.iter());
-        let ethalon = json!({"key": "Some text"});
+        let ethalon = serde_json::json!({"key": "Some text"});
         assert_eq!(ethalon, value);
 
         stats[0].value = "\"777\"".into();
         let value = stats_to_json(stats.iter());
-        let ethalon = json!({"key": "777"});
+        let ethalon = serde_json::json!({"key": "777"});
         assert_eq!(ethalon, value);
 
-        stats[0].value = json!({"a": 777}).to_string();
+        stats[0].value = serde_json::json!({"a": 777}).to_string();
         let value = stats_to_json(stats.iter());
-        let ethalon = json!({"key": {"a": 777}});
+        let ethalon = serde_json::json!({"key": {"a": 777}});
         assert_eq!(ethalon, value);
     }
 
