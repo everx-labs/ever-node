@@ -457,18 +457,20 @@ This tool prints a state or block from the database.
 ### How to use
 
 ```bash
-print -d path [-s state_id] [-b block_id] [--accounts]
+print [--path path/to/node_db] [--state block_id] [--block block_id] [--shards block_id] [--boc path/to/boc] [--brief] [--accounts]
 ```
 
 Where
 
-`path` – path to node database.
+`--path` – path to node database.
 
-`block_id` – id of the block to be printed.
+`--boc` - path to boc file with message, state or account. If account is config - config params will be printed
 
-`state_id` – id of the state to be printed.
+`block_id` – id of the block, state or shards to be printed.
 
-`accounts` - short info of all accounts will be printed as json
+`--brief` - print block without messages and transactions, state without accounts
+
+`--accounts` - short info of all accounts will be printed as json
 
 ## Contributing
 

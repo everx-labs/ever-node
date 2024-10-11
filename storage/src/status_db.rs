@@ -15,12 +15,9 @@ use std::borrow::Borrow;
 
 use ever_block::Result;
 
-use crate::db_impl_base;
-use crate::db::traits::KvcWriteable;
-use crate::traits::Serializable;
-use crate::types::StatusKey;
+use crate::{db_impl_base, db::rocksdb::RocksDbTable, traits::Serializable, types::StatusKey};
 
-db_impl_base!(StatusDb, KvcWriteable, StatusKey);
+db_impl_base!(StatusDb, StatusKey);
 
 impl StatusDb {
     pub fn try_get_value<T: Serializable>(&self, key: &StatusKey) -> Result<Option<T>> {

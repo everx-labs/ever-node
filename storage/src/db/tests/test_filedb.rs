@@ -52,7 +52,7 @@ impl DerefMut for AutoDestroyableDb {
 impl Drop for AutoDestroyableDb {
     fn drop(&mut self) {
         if self.path().is_dir() {
-            std::fs::remove_dir_all(&self.db.path())
+            std::fs::remove_dir_all(self.db.path())
                 .expect("Failed to destroy DB");
         }
     }

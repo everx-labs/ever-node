@@ -3627,7 +3627,7 @@ impl Collator {
         if !res {
             fail!(
                 "cannot apply the after-split update for {} without a corresponding sibling update",
-                new_info.blk_id()
+                new_info.block_id()
             );
         }
         if let Some(ancestor) = ancestor {

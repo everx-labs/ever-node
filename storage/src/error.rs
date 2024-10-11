@@ -15,23 +15,9 @@ use ever_block::BlockIdExt;
 
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum StorageError {
-    /// Key not found  
+    /// Key not found
     #[error("Key not found: {0}({1})")]
     KeyNotFound(&'static str, String),
-
-/*
-    /// Reference not loaded
-    #[error("Reference not loaded. Need to load reference.")]
-    ReferenceNotLoaded,
-*/
-
-    /// Database is dropped
-    #[error("Database is dropped")]
-    DbIsDropped,
-
-    /// One or more active transactions exist
-    #[error("Operation is not permitted while one or more active transactions exist")]
-    HasActiveTransactions,
 
     /// Reading out of buffer range
     #[error("Reading out of buffer range")]
