@@ -116,6 +116,7 @@ pub struct Block {
     mc_node_delivery_descs: Vec<NodeDeliveryDesc>, //delivery info for MC nodes
     delivery_stats: BlockDeliveryStats,               //delivery stats
     block_start_sync_time: SystemTime,                //start time of block sync
+    is_verification_initiated: bool,                  //is verification initiated
 }
 
 pub type BlockPtr = Arc<SpinMutex<Block>>;
@@ -150,6 +151,16 @@ impl Block {
         &self.block_id
     }
 
+    /// Is verification initiated
+    pub fn is_verification_initiated(&self) -> bool {
+        self.is_verification_initiated
+    }
+
+    /// Set verification initiated
+    pub fn set_verification_initiated(&mut self) {
+        self.is_verification_initiated = true;
+    }
+
     /// Is block delivered
     pub fn is_delivered(
         &self,
@@ -161,14 +172,30 @@ impl Block {
         delivered_weight >= cutoff_weight
     }
 
-    /// Is block rejected
-    pub fn is_rejected(&self) -> bool {
+    /// Does block have rejections
+    pub fn has_rejections(&self) -> bool {
         !self.rejections_signature.empty()
+    }
+
+    /// Check if block was rejected by specific node
+    pub fn is_rejected_by_node(&self, node_idx: usize) -> bool {
+        self.rejections_signature.is_signed_by_node(node_idx)
     }
 
     /// Does block have approves
     pub fn has_approves(&self) -> bool {
         !self.approvals_signature.empty()
+    }
+
+    /// Is block approved
+    pub fn is_approved(
+        &self,
+        validators: &Vec<ValidatorDescr>,
+        cutoff_weight: ValidatorWeight,
+    ) -> bool {
+        let approvals_weight = self.approvals_signature.get_total_weight(validators);
+
+        approvals_weight >= cutoff_weight
     }
 
     /// Block first appearance time
@@ -603,6 +630,11 @@ impl Block {
         false
     }
 
+    /// Get candidate
+    pub fn get_block_candidate(&self) -> Option<Arc<BlockCandidateBody>> {
+        self.block_candidate.clone()
+    }
+
     /// Create new block
     pub fn create(
         block_id: &BlockIdExt,
@@ -650,6 +682,7 @@ impl Block {
             }; mc_nodes_count],
             delivery_stats: BlockDeliveryStats::default(),
             block_start_sync_time: SystemTime::now(),
+            is_verification_initiated: false,
         };
 
         Arc::new(SpinMutex::new(body))

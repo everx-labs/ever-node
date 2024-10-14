@@ -17,20 +17,11 @@ use crate::{
     engine_traits::EngineOperations,
     shard_state::ShardStateStuff,
     validator::{
-        remp_block_parser::{RempMasterblockObserver, find_previous_sessions},
-        remp_manager::{RempManager, RempInterfaceQueues},
-        sessions_computing::{
-            GeneralSessionInfo, SessionValidatorsInfo, SessionValidatorsList, 
-            SessionValidatorsCache
-        },
-        validator_group::{ValidatorGroup, ValidatorGroupStatus},
-        validator_utils::{
-            get_masterchain_seqno, get_block_info_by_id,
-            compute_validator_list_id, get_group_members_by_validator_descrs, 
-            is_remp_enabled, try_calc_subset_for_workchain, validatordescr_to_catchain_node,
-            validatorset_to_string, ValidatorListHash, ValidatorSubsetInfo
-        },
-        out_msg_queue::OutMsgQueueInfoStuff,
+        out_msg_queue::OutMsgQueueInfoStuff, remp_block_parser::{find_previous_sessions, RempMasterblockObserver}, remp_manager::{RempInterfaceQueues, RempManager}, sessions_computing::{
+            GeneralSessionInfo, SessionValidatorsCache, SessionValidatorsInfo, SessionValidatorsList
+        }, validator_group::{ValidatorGroup, ValidatorGroupStatus}, validator_utils::{
+            compute_validator_list_id, get_block_info_by_id, get_group_members_by_validator_descrs, get_masterchain_seqno, is_remp_enabled, try_calc_subset_for_workchain, validatordescr_to_catchain_node, validatorset_to_string, ValidatorListHash, ValidatorSubsetInfo
+        }, verification
     },
 };
 use crate::validator::{
@@ -1692,6 +1683,14 @@ impl ValidatorManagerImpl {
         let candidate_id = block_candidate.block_id.clone();
 
         log::debug!(target: "verificator", "Verifying block candidate {:?}", candidate_id);
+
+        if verification::DEBUG_NACK_APPEARENCE {
+            use rand::Rng;
+            if rand::thread_rng().gen_range(0, 100) < 20 {
+                log::warn!(target: "verificator", "Block {:?} verification error: random error", candidate_id);
+                return false;
+            }
+        }
 
         match run_validate_query_any_candidate(block_candidate.clone(), engine).await {
             Ok(_time) => return true,
