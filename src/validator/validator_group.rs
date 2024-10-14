@@ -647,6 +647,7 @@ impl ValidatorGroup {
                     self.local_key.clone(),
                     self.validator_set.clone(),
                     self.engine.clone(),
+                    self.verification_manager.clone(),
                 ).await {
                     Ok(b) => Ok(Arc::new(b)),
                     Err(x) => Err(x)

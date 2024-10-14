@@ -4504,15 +4504,9 @@ impl ValidateQuery {
                 base.value_flow.fees_imported, fees_imported)
         }
         // ^[ prev_blk_signatures:(HashmapE 16 CryptoSignaturePair)
-        if !base.mc_extra.prev_blk_signatures().is_empty() && base.block_id().seq_no == 1 {
-            reject_query!("block contains non-empty signature set for the zero state of the masterchain")
-        }
-        if base.block_id().seq_no > 1 {
-            if !base.mc_extra.prev_blk_signatures().is_empty() {
-            // TODO: check signatures here
-            } else if !base.is_fake && false {  // FIXME: remove "&& false" when collator serializes signatures
-                reject_query!("block contains an empty signature set for the previous block")
-            }
+        // prev_blk_signatures is not implemented and should be empty
+        if !base.mc_extra.prev_blk_signatures().is_empty() {
+            reject_query!("block contains non-empty signature set for the previous block")
         }
         //   recover_create_msg:(Maybe ^InMsg)
         //   mint_msg:(Maybe ^InMsg) ]

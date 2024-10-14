@@ -6,6 +6,7 @@ use std::{
 };
 
 use ever_block::{BlockIdExt, ConnectedNwConfig, error, fail, Result};
+#[cfg(not(feature = "external_db"))]
 use ton_api::ton::ton_node::broadcast::MeshUpdateBroadcast;
 
 use storage::block_handle_db::BlockHandle;
@@ -621,6 +622,7 @@ impl ConnectedNwClient {
         self.cancellation_token.cancel();
     }
 
+    #[cfg(not(feature = "external_db"))]
     pub async fn process_broadcast(&self, broadcast: MeshUpdateBroadcast) -> Result<()> {
         log::debug!("{}: process_broadcast {}", self.descr, broadcast.id);
 
@@ -956,6 +958,7 @@ impl MeshClient {
         Ok(())
     }
 
+    #[cfg(not(feature = "external_db"))]
     pub async fn process_broadcast(&self, broadcast: MeshUpdateBroadcast) -> Result<()> {
     
         let client = self.clients.get(&broadcast.src_nw)

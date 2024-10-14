@@ -1518,7 +1518,7 @@ impl ValidatorManagerImpl {
         }
         let remp_manager = self.remp_manager.as_ref().ok_or_else(|| error!("Should not read states back if no REMP is active"))?;
 
-        if upper_id.seq_no <= 0 {
+        if upper_id.seq_no == 0 {
             return Ok((0..=0, upper_id.clone()));
         }
 

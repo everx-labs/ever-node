@@ -1450,16 +1450,14 @@ Ok(if key_block {
     }
 
     async fn wait_broadcast(&self) -> Result<Option<(Broadcast, Arc<KeyId>)>> {
-        loop {
-            match self.network_context.overlay.wait_for_broadcast(&self.overlay_id).await? {
-                Some(info) => {
-                    let answer: Broadcast = Deserializer::new(
-                        &mut Cursor::new(info.data)
-                    ).read_boxed()?;
-                    break Ok(Some((answer, info.recv_from)))
-                },
-                None => break Ok(None),
-            }
+        match self.network_context.overlay.wait_for_broadcast(&self.overlay_id).await? {
+            Some(info) => {
+                let answer: Broadcast = Deserializer::new(
+                    &mut Cursor::new(info.data)
+                ).read_boxed()?;
+                Ok(Some((answer, info.recv_from)))
+            },
+            None => Ok(None),
         }
     }
 

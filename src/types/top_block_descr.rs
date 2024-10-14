@@ -34,7 +34,6 @@ pub use self::id::TopBlockDescrId;
 
 bitflags::bitflags! {
     pub struct Mode: u8 {
-        const DEFAULT = 0;
         const FAIL_NEW = 1;
         const FAIL_TOO_NEW = 2;
         const ALLOW_OLD = 4;

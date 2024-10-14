@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.60.4
+
+- Fixed warnings after audit
+
 ## Version 0.60.3
 
 - Fix serialization cache for SMFT block status

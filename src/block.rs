@@ -506,7 +506,7 @@ impl BlockStuff {
     }
 
     pub fn write_to<T: Write>(&self, dst: &mut T) -> Result<()> {
-        dst.write(&self.data)?;
+        dst.write_all(&self.data)?;
         Ok(())
     }
 
