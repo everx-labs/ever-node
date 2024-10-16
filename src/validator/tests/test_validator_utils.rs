@@ -184,7 +184,7 @@ fn test_create_new_proof_with_workchains() {
         assert!(descr.public_key.verify_signature(&data, &signature));
         assert_ne!(pub_key.id().data(), &[0; 32]);
         signatures.push(CryptoSignaturePair::with_params(
-            pub_key.id().data().clone().into(),
+            (*pub_key.id().data()).into(),
             signature
         ));
         list.push(descr);

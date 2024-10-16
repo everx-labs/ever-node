@@ -46,6 +46,7 @@ pub async fn download_persistent_state(
     result.ok_or_else(|| error!("internal error!"))?
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_persistent_state_iter(
     id: &BlockIdExt,
     msg_queue_for: Option<i32>,

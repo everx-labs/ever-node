@@ -22,6 +22,7 @@ use std::{
 use std::sync::atomic::{AtomicUsize, Ordering};
 use dashmap::DashMap;
 
+use rand::Rng;
 use ton_api::ton::ton_node::{
     RempMessageStatus, RempMessageLevel,
     rempmessagestatus::{RempAccepted, RempIgnored, RempRejected}, 
@@ -29,8 +30,7 @@ use ton_api::ton::ton_node::{
     RempCatchainRecordV2,
     rempcatchainrecordv2::{RempCatchainMessageHeaderV2, RempCatchainMessageDigestV2}
 };
-use ever_block::{ShardIdent, Message, BlockIdExt, ValidatorDescr, Sha256};
-use ever_block::{UInt256, Result, fail, gen_random_index, error};
+use ever_block::{error, fail, BlockIdExt, Message, Result, Sha256, ShardIdent, UInt256, ValidatorDescr};
 
 use catchain::{PrivateKey, PublicKey};
 use crate::{
@@ -158,13 +158,13 @@ impl MessageQueue {
 
         log::trace!(target: "remp", "Creating MessageQueue {}", remp_catchain_instance);
 
-        return Ok(Self {
+        Ok(Self {
             remp_manager,
             engine,
             catchain_info: remp_catchain_info,
             catchain_instance: remp_catchain_instance,
             queues,
-        });
+        })
     }
 
     pub async fn create_and_start(
@@ -203,15 +203,13 @@ impl MessageQueue {
     }
 
     pub fn update_status_send_response(&self, msgid: &UInt256, origin: Arc<RempMessageOrigin>, new_status: RempMessageStatus) {
-        if let Err(e) = self.remp_manager.message_cache.update_message_status(&msgid, new_status.clone()) {
+        if let Err(e) = self.remp_manager.message_cache.update_message_status(msgid, new_status.clone()) {
             log::error!(target: "remp",
                 "RMQ {}: Cannot update status for {:x}, new status {}, error {}",
                 self, msgid, new_status, e
             )
-        } else {
-            if !is_finally_accepted(&new_status) {
-                self.send_response_to_fullnode(msgid, origin, new_status)
-            }
+        } else if !is_finally_accepted(&new_status) {
+            self.send_response_to_fullnode(msgid, origin, new_status)
         }
     }
 
@@ -376,13 +374,12 @@ impl MessageQueue {
     }
 
     pub(crate) fn is_final_status(status: &RempMessageStatus) -> bool {
-        match status {
+        matches!(
+            status,
             RempMessageStatus::TonNode_RempRejected(_) |
             RempMessageStatus::TonNode_RempTimeout |
-            RempMessageStatus::TonNode_RempAccepted(RempAccepted { level: RempMessageLevel::TonNode_RempMasterchain, .. }) => true,
-
-            _ => false
-        }
+            RempMessageStatus::TonNode_RempAccepted(RempAccepted { level: RempMessageLevel::TonNode_RempMasterchain, .. })
+        )
     }
 
     fn increment_status_level(level: &RempMessageLevel) -> Option<RempMessageLevel> {
@@ -412,9 +409,7 @@ impl MessageQueue {
 
         let status_if_new = if let Some((_msg, status)) = self.is_queue_overloaded().await {
             status
-        } else {
-            if forwarded { Self::forwarded_ignored_status().clone() } else { RempMessageStatus::TonNode_RempNew }
-        };
+        } else if forwarded { Self::forwarded_ignored_status().clone() } else { RempMessageStatus::TonNode_RempNew };
 
         // New message arrived: we consider the arrived status as 'New'/forwarded 'Ignored'
         // (Rejected messages arrive via 'Digest' messages)
@@ -478,13 +473,10 @@ impl MessageQueue {
             }
             Ok((old_status, new_status, _body_updated)) => {
                 log::trace!(target: "remp",
-                            "Point 4. RMQ {}. Message {:x} master_cc_seqno {} from validator {} has non-final status {}{}, will be collated",
-                            self, remp_message_header.message_id, message_master_seqno, remp_message_origin.source_idx, new_status,
-                            match &old_status {
-                                None => format!(" (no old status)"),
-                                Some(x) => format!(" (old status {})", x)
-                            }
-                        );
+                    "Point 4. RMQ {}. Message {:x} master_cc_seqno {} from validator {} has non-final status {}{}, will be collated",
+                    self, remp_message_header.message_id, message_master_seqno, remp_message_origin.source_idx, new_status,
+                    old_status.map_or_else(|| " (no old status)".to_string(), |x| format!(" (old status {})", x))
+                );
                 self.add_pending_collation(&remp_message_header.message_id, remp_message_origin, remp_node_sender, Some(new_status)).await?;
                 #[cfg(feature = "telemetry")]
                 self.engine.remp_core_telemetry().add_to_cache_attempt(true);
@@ -614,10 +606,10 @@ impl MessageQueue {
             Some((None, h, o, s, _cc)) => {
                 // -1 for absent index seems to be the easiest way to get around borrow/scope checker
                 let dst_idx = self.queues.execute_sync(|x|
-                    match x.get_body_sources(&msg_id) {
+                    match x.get_body_sources(msg_id) {
                         None => -1,
-                        Some(v) if v.len() == 0 => -1,
-                        Some(v) => v.get(gen_random_index(v.len() as u16) as usize).map(|nn| *nn as i32).unwrap_or(-1)
+                        Some(v) if v.is_empty() => -1,
+                        Some(v) => v[rand::thread_rng().gen_range(0..v.len())] as i32
                     }
                 ).await;
 
@@ -697,7 +689,7 @@ impl MessageQueue {
 
     async fn put_back_to_collation_queue(&self, msgid: &UInt256, timestamp: SystemTime) -> Result<()> {
         let (added, _) = self.queues.execute_sync(|x|
-            x.add_to_collation_queue(&msgid, timestamp, None, false)
+            x.add_to_collation_queue(msgid, timestamp, None, false)
         ).await?;
 
         if !added {
@@ -741,7 +733,7 @@ impl MessageQueue {
 
             return Ok(Some((msgid,message,origin)));
         }
-        return Ok(None)
+        Ok(None)
     }
 
     pub async fn prepare_messages_for_collation (&self) -> Result<Vec<(UInt256, Arc<Message>, Arc<RempMessageOrigin>)>> {
@@ -1003,7 +995,9 @@ impl RmqQueueManager {
         local_public_key: &PublicKey
     ) -> Self {
         // If RMQ is not enabled, current & prev queues are not created.
-        let manager = RmqQueueManager {
+        
+
+        RmqQueueManager {
             engine,
             remp_manager,
             shard: shard.clone(),
@@ -1011,14 +1005,16 @@ impl RmqQueueManager {
             next_queues: DashMap::new(), //MutexWrapper::new(vec!(), format!("Next queues for {}", shard.clone())),
             local_public_key: local_public_key.clone(),
             //status: MessageQueueStatus::Active
-        };
-
-        manager
+        }
     }
 
-    pub fn set_queues(&mut self,
-                      session_params: Arc<GeneralSessionInfo>, node_list_id: ValidatorListHash,
-                      master_cc_range: &RangeInclusive<u32>, curr: &Vec<ValidatorDescr>, next: &Vec<ValidatorDescr>,
+    pub fn set_queues(
+        &mut self,
+        session_params: Arc<GeneralSessionInfo>,
+        node_list_id: ValidatorListHash,
+        master_cc_range: &RangeInclusive<u32>,
+        curr: &[ValidatorDescr],
+        next: &[ValidatorDescr],
     ) -> Result<()> {
         if self.remp_manager.options.is_service_enabled() {
             if self.cur_queue.is_some() {
@@ -1042,7 +1038,7 @@ impl RmqQueueManager {
 
     pub async fn add_new_queue(&self,
         next_master_cc_range: &RangeInclusive<u32>,
-        prev_validators: &Vec<ValidatorDescr>, next_validators: &Vec<ValidatorDescr>,
+        prev_validators: &[ValidatorDescr], next_validators: &[ValidatorDescr],
         general_new_session_info: Arc<GeneralSessionInfo>,
         node_list_id: ValidatorListHash
     ) -> Result<()> {
@@ -1090,7 +1086,7 @@ impl RmqQueueManager {
 
         if let Some(queue) = &self.cur_queue {
             let next_queue_infos: Vec<Arc<RempCatchainInfo>> = self.get_next_queues();
-            if next_queue_infos.len() == 0 {
+            if next_queue_infos.is_empty() {
                 log::trace!(target: "remp", "RMQ {}: no next queues to forward messages", self);
                 return
             }
@@ -1146,7 +1142,7 @@ impl RmqQueueManager {
                         );
                         continue
                     },
-                    Ok(Some((_m, _header, _origin, status, _cc))) if status == RempMessageStatus::TonNode_RempTimeout => continue,
+                    Ok(Some((_m, _header, _origin, RempMessageStatus::TonNode_RempTimeout, _cc))) => continue,
                     Ok(Some((_m, _header, _origin, _status, cc))) if !new_cc_range.contains(&cc) => {
                         if *new_cc_range.end() < cc {
                             log::error!(target: "remp", "Point 5a. RMQ {}: message {:x} is younger (cc={}) than next_cc_range end {}..={} -- impossible",
@@ -1172,12 +1168,13 @@ impl RmqQueueManager {
                 // All other messages are not forwarded
 
                 if is_finally_rejected(&message_status) {
-                    let mut digest = RempCatchainMessageDigestV2::default();
-                    digest.masterchain_seqno = message_cc as i32;
-                    digest.messages.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
-                        id: message.message_id.clone(),
-                        uid: message.message_uid.clone()
-                    });
+                    let digest = RempCatchainMessageDigestV2 {
+                        masterchain_seqno: message_cc as i32,
+                        messages: vec!(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
+                            id: message.message_id.clone(),
+                            uid: message.message_uid.clone()
+                        })
+                    };
                     rejected_message_digests.push(digest);
                 }
                 else if !is_finally_accepted(&message_status) {
@@ -1199,7 +1196,7 @@ impl RmqQueueManager {
                             self, msgid, new, x
                         )
                         } else {
-                            sent = sent + 1;
+                            sent += 1;
                         }
                     }
                 }
@@ -1219,8 +1216,8 @@ impl RmqQueueManager {
                             self, digest_len, new, x
                         )
                     } else {
-                        sent = sent + 1;
-                        sent_rejects = sent_rejects + 1;
+                        sent += 1;
+                        sent_rejects += 1;
                     }
                 }
             }
@@ -1334,7 +1331,7 @@ impl RmqQueueManager {
                     (Some(msg), _) => {
                         if let Some((overload_message, status)) = cur_queue.is_queue_overloaded().await {
                             log::warn!(target: "remp", "Point 3. RMQ {}: {}, ignoring incoming message {}", self, overload_message, msg);
-                            cur_queue.send_response_to_fullnode(&msg.get_message_id(), Arc::new(msg.origin.clone()), status);
+                            cur_queue.send_response_to_fullnode(msg.get_message_id(), Arc::new(msg.origin.clone()), status);
                             cnt_rejected_overload+=1;
                         }
                         else if let Err(e) = self.put_message_to_rmq(msg.clone()).await {
@@ -1345,7 +1342,7 @@ impl RmqQueueManager {
                             break 'a;
                         }
                         else {
-                            cnt = cnt+1;
+                            cnt += 1;
                         }
                     }
                     (None, _pending) => {
@@ -1403,7 +1400,7 @@ impl RmqQueueManager {
         for s in self.next_queues.iter() {
             sessions.push(s.key().clone());
         }
-        return sessions;
+        sessions
     }
 }
 
@@ -1415,7 +1412,7 @@ impl Drop for RmqQueueManager {
 
 impl fmt::Display for RmqQueueManager {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let cur = if let Some(q) = &self.cur_queue { format!("{}", q) } else { format!("*none*") };
+        let cur = if let Some(q) = &self.cur_queue { format!("{}", q) } else { "*none*".to_string() };
 /*
         let new = if self.new_queues.len() > 0 { 
             self.new_queues.iter().map( |q| format!(" {}",q) ).collect() 

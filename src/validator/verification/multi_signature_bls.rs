@@ -87,15 +87,15 @@ impl MultiSignature {
     }
 
     /// Merge signatures (internal)
-    fn merge_impl(&mut self, other_signature: &Vec<u8>) -> Result<()> {
+    fn merge_impl(&mut self, other_signature: &[u8]) -> Result<()> {
         check_execution_time!(5_000);
-        if self.signature.len() == 0 {
-            self.signature = other_signature.clone();
+        if self.signature.is_empty() {
+            self.signature = other_signature.to_vec();
 
             self.update_hash();
 
-            return Ok(());
-        } else if other_signature.len() == 0 {
+            Ok(())
+        } else if other_signature.is_empty() {
             return Ok(());
         } else {
             let new_signature = aggregate_two_bls_signatures(&self.signature, other_signature)?;
@@ -118,7 +118,7 @@ impl MultiSignature {
 
     /// Is the signature empty
     pub fn empty(&self) -> bool {
-        self.signature.len() == 0
+        self.signature.is_empty()
     }
 
     /// Check if node signature is present
@@ -127,7 +127,7 @@ impl MultiSignature {
     }
 
     /// Total weight
-    pub fn get_total_weight(&self, validators: &Vec<ValidatorDescr>) -> ValidatorWeight {
+    pub fn get_total_weight(&self, validators: &[ValidatorDescr]) -> ValidatorWeight {
         let mut total_weight = 0;
 
         for validator_idx in &self.nodes {
@@ -143,12 +143,12 @@ impl MultiSignature {
     }
 
     /// Compute nodes and hash
-    fn compute_nodes_and_hash(signature: &Vec<u8>) -> (Vec<u16>, u32) {
+    fn compute_nodes_and_hash(signature: &[u8]) -> (Vec<u16>, u32) {
         check_execution_time!(1_000);
         let mut new_nodes = Vec::new();
 
-        if signature.len() > 0 {
-            if let Ok(nodes_info) = get_nodes_info_from_sig(&signature) {
+        if !signature.is_empty() {
+            if let Ok(nodes_info) = get_nodes_info_from_sig(signature) {
                 if let Ok(nodes_info) = NodesInfo::deserialize(&nodes_info) {
                     for (validator_idx, number_of_occurrence) in &nodes_info.map {
                         if *number_of_occurrence < 1 {
@@ -185,17 +185,12 @@ impl MultiSignature {
     }
 
     /// Deserialize signature
-    pub fn deserialize(type_id: u8, candidate_id: &UInt256, wc_pub_key_refs: &Vec<&[u8; BLS_PUBLIC_KEY_LEN]>, serialized_signature: &[u8]) -> Result<Self> {
+    pub fn deserialize(type_id: u8, candidate_id: &UInt256, wc_pub_key_refs: &[&[u8; BLS_PUBLIC_KEY_LEN]], serialized_signature: &[u8]) -> Result<Self> {
         check_execution_time!(20_000);
 
-        //let signature = inflate::inflate_bytes(serialized_signature);
-        let signature: Result<Vec<u8>> = Ok(serialized_signature.to_vec());
-
-        if let Err(err) = signature {
-            fail!("inflate error: {}", err);
-        }
-
-        let signature = signature.unwrap();
+        // let signature = inflate::inflate_bytes(serialized_signature)
+        //     .map_err(|err| error!("inflate error: {}", err))?;
+        let signature = serialized_signature.to_vec();
 
         let mut body = Self::new(type_id, candidate_id.clone());
 
@@ -203,7 +198,7 @@ impl MultiSignature {
 
         body.update_hash();
 
-        if signature.len() > 0 {
+        if !signature.is_empty() {
             let start_time = SystemTime::now();
             let nodes_info = get_nodes_info_from_sig(&signature)?;
             let aggregated_pub_key = aggregate_public_keys_based_on_nodes_info(wc_pub_key_refs, &nodes_info)?;
@@ -212,10 +207,7 @@ impl MultiSignature {
                 fail!("Can't verify block candidate {:?} signature {:?} (type {})", candidate_id, body, type_id);
             }
 
-            let processing_delay = match start_time.elapsed() {
-                Ok(elapsed) => elapsed,
-                Err(_err) => Duration::default(),
-            };
+            let processing_delay = start_time.elapsed().unwrap_or_default();
 
             if processing_delay > BLS_DESERIALIZE_WARN_DELAY {
                 log::warn!(target: "verificator", "Long BLS deserialization latency={:.3}s for signature={:?}", processing_delay.as_secs_f64(), body);
@@ -227,7 +219,7 @@ impl MultiSignature {
 
     /// Create new signature
     pub fn new(type_id: u8, candidate_id: UInt256) -> Self {
-        let msg: [u8; 32] = candidate_id.as_array().clone().into();
+        let msg: [u8; 32] = *candidate_id.as_array();
         let mut msg = msg.to_vec();
 
         msg.push(type_id);        

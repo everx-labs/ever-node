@@ -214,7 +214,7 @@ impl ReceiverSource for ReceiverSourceImpl {
         self.blamed = true;
     }
 
-    fn get_forks(&self) -> &Vec<usize> {
+    fn get_forks(&self) -> &[usize] {
         &self.fork_ids
     }
 

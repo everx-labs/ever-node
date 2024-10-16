@@ -384,7 +384,7 @@ impl RempClient {
         log::trace!("process_block {}", block.id());
 
         block.block()?.read_extra()?.read_in_msg_descr()?.iterate_slices_with_keys(|key, _msg_slice| {
-            if let Some(_) = self.messages.get(&key) {
+            if self.messages.get(&key).is_some() {
                 let (level, master_id, finalized) = if let Some(mc_id) = applied {
                     (RempMessageLevel::TonNode_RempMasterchain,
                      mc_id.clone(),
@@ -656,10 +656,10 @@ impl RempClient {
 
         // Build RempMessage struct
         let remp_message = ton_api::ton::ton_node::rempmessage::RempMessage {
-            message: raw_message.into(),
+            message: raw_message,
             id: id.clone(),
             timestamp: 0, // Validator sets it?
-            signature: Vec::new().into() // TODO
+            signature: Vec::new() // TODO
         }.into_boxed();
 
         let (validators, mc_cc_to_die) = Self::calculate_validators(
@@ -830,13 +830,10 @@ impl RempClient {
                 0.into())?;
             for v in &subset {
                 let key = get_adnl_id(v);
-                if !validators.contains_key(&key) {
-                    let val = ValidatorInfo {
-                        got_receipt_from: Arc::new(AtomicBool::new(false)),
-                        //pub_key: Ed25519KeyOption::from_public_key(v.public_key.key_bytes()),
-                    };
-                    validators.insert(key, val);
-                }
+                validators.entry(key).or_insert_with(|| ValidatorInfo {
+                    got_receipt_from: Arc::new(AtomicBool::new(false)),
+                    //pub_key: Ed25519KeyOption::from_public_key(v.public_key.key_bytes()),
+                });
             }
         }
 
@@ -1018,7 +1015,7 @@ impl RempClient {
                     to_resolve.push(validatordescr_to_catchain_node(v))
                 }
             }
-            if to_delete.len() > 0 || to_resolve.len() > 0 {
+            if !to_delete.is_empty() || !to_resolve.is_empty() {
                 let engine = self.engine.get().ok_or_else(|| error!("engine was not set"))?;
                  // TODO support callback
                 engine.update_validators(to_resolve, to_delete).await?;

@@ -61,7 +61,7 @@ impl VoteCandidate for VoteCandidateImpl {
     fn get_source_index(&self) -> u32 {
         match &self.block {
             Some(block) => block.get_source_index(),
-            _ => std::u32::MAX,
+            _ => u32::MAX,
         }
     }
 

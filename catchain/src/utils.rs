@@ -235,7 +235,7 @@ pub fn get_block_dependency_hash(block: &ton::BlockDep, receiver: &dyn Receiver)
 macro_rules! serialize_tl_bare_object
 {
   ($($args:expr),*) => {{
-    let mut ret : ton_api::ton::bytes = ton_api::ton::bytes::default();
+    let mut ret = ton_api::ton::bytes::default();
     let mut serializer = ton_api::Serializer::new(&mut ret.0);
 
     $(serializer.write_bare($args).unwrap();)*
@@ -248,7 +248,7 @@ macro_rules! serialize_tl_bare_object
 macro_rules! serialize_tl_boxed_object
 {
   ($($args:expr),*) => {{
-    let mut ret : ton_api::ton::bytes = ton_api::ton::bytes::default();
+    let mut ret = ton_api::ton::bytes::default();
     let mut serializer = ton_api::Serializer::new(&mut ret);
 
     $(serializer.write_boxed($args).unwrap();)*
@@ -288,15 +288,13 @@ where
 }
 
 pub fn deserialize_tl_bare_object<T: ::ton_api::BareDeserialize>(bytes: &RawBuffer) -> Result<T> {
-    let cloned_bytes = bytes.clone();
-    let data: &mut &[u8] = &mut cloned_bytes.as_slice();
-    ton_api::Deserializer::new(data).read_bare()
+    let mut cursor = std::io::Cursor::new(bytes);
+    ton_api::Deserializer::new(&mut cursor).read_bare()
 }
 
 pub fn deserialize_tl_boxed_object<T: ::ton_api::BoxedDeserialize>(bytes: &RawBuffer) -> Result<T> {
-    let cloned_bytes = bytes.clone();
-    let data: &mut &[u8] = &mut cloned_bytes.as_slice();
-    ton_api::Deserializer::new(data).read_boxed()
+    let mut cursor = std::io::Cursor::new(bytes);
+    ton_api::Deserializer::new(&mut cursor).read_boxed()
 }
 
 /*

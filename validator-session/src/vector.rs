@@ -126,6 +126,10 @@ where
         self.data.len()
     }
 
+    fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     fn at(&self, index: usize) -> &T {
         assert!(index <= self.data.len());
 
@@ -174,7 +178,7 @@ where
     fn modify(
         &self,
         desc: &mut dyn SessionDescription,
-        modifier: &Box<dyn Fn(&T) -> T>,
+        modifier: &dyn Fn(&T) -> T,
     ) -> PoolPtr<dyn Vector<T>> {
         instrument!();
 
@@ -232,6 +236,13 @@ where
         }
     }
 
+    fn is_empty(&self) -> bool {
+        match self {
+            Some(vec) => vec.is_empty(),
+            _ => true,
+        }
+    }
+
     fn at(&self, index: usize) -> &T {
         self.as_ref().unwrap().at(index)
     }
@@ -277,7 +288,7 @@ where
     fn modify(
         &self,
         desc: &mut dyn SessionDescription,
-        modifier: &Box<dyn Fn(&T) -> T>,
+        modifier: &dyn Fn(&T) -> T,
     ) -> Option<PoolPtr<dyn Vector<T>>> {
         instrument!();
 
@@ -591,6 +602,10 @@ where
         self.data.len()
     }
 
+    fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     fn at(&self, index: usize) -> &T {
         assert!(index <= self.data.len());
 
@@ -642,7 +657,14 @@ where
     fn len(&self) -> usize {
         match self {
             Some(vec) => vec.len(),
-            _ => 0,
+            None => 0
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Some(vec) => vec.is_empty(),
+            None => true
         }
     }
 
@@ -697,7 +719,7 @@ where
                             T::get_vector_instance_counter(desc),
                         );
 
-                        result.data.extend_from_slice(&data);
+                        result.data.extend_from_slice(data);
 
                         result.data[middle] = value;
 
@@ -851,7 +873,7 @@ where
                     left_index += 1;
                     right_index += 1;
 
-                    items.push(merge_fn(&left_item, &right_item, desc));
+                    items.push(merge_fn(left_item, right_item, desc));
                 }
             }
         }

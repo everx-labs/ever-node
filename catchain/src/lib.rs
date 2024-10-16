@@ -425,7 +425,7 @@ pub trait ReceiverSource {
     fn get_forks_count(&self) -> usize;
 
     /// Get list of forks
-    fn get_forks(&self) -> &Vec<usize>;
+    fn get_forks(&self) -> &[usize];
 
     /// Add new fork for this validator
     fn add_fork(&mut self, receiver: &mut dyn Receiver) -> usize;
@@ -736,7 +736,7 @@ pub trait CatchainOverlayManager {
         &self,
         local_id: &PublicKeyHash,
         overlay_short_id: &Arc<PrivateOverlayShortId>,
-        nodes: &Vec<CatchainNode>,
+        nodes: &[CatchainNode],
         overlay_listener: CatchainOverlayListenerPtr,
         log_replay_listener: CatchainOverlayLogReplayListenerPtr,
     ) -> Result<CatchainOverlayPtr>;
@@ -907,7 +907,7 @@ pub trait LogPlayer {
     fn get_local_key(&self) -> &PrivateKey;
 
     /// Get list of nodes
-    fn get_nodes(&self) -> &Vec<CatchainNode>;
+    fn get_nodes(&self) -> &[CatchainNode];
 
     /// Get weights
     fn get_weights(&self) -> &Vec<ValidatorWeight>;
@@ -1028,7 +1028,7 @@ impl CatchainFactory {
     pub fn create_receiver(
         listener: ReceiverListenerPtr,
         incarnation: &SessionId,
-        ids: &Vec<CatchainNode>,
+        ids: &[CatchainNode],
         local_key: &PrivateKey,
         path: String,
         db_suffix: String,
@@ -1065,7 +1065,7 @@ impl CatchainFactory {
     pub fn create_catchain(
         options: &Options,
         session_id: &SessionId,
-        ids: &Vec<CatchainNode>,
+        ids: Vec<CatchainNode>,
         local_key: &PrivateKey,
         path: String,
         db_suffix: String,

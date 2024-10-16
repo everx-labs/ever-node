@@ -106,13 +106,13 @@ impl Default for ValidateResult {
             lt_hash: Default::default(),
             msg_proc_lt: Default::default(),
             lib_publishers: Default::default(),
-            min_shard_ref_mc_seqno: Arc::new(AtomicU32::new(std::u32::MAX)),
-            max_shard_utime: Arc::new(AtomicU32::new(std::u32::MIN)),
-            max_shard_lt: Arc::new(AtomicU64::new(std::u64::MIN)),
+            min_shard_ref_mc_seqno: Arc::new(AtomicU32::new(u32::MAX)),
+            max_shard_utime: Arc::new(AtomicU32::new(u32::MIN)),
+            max_shard_lt: Arc::new(AtomicU64::new(u64::MIN)),
         };
-        result.lt_hash.insert(0, (std::u64::MIN, UInt256::MAX));
-        result.lt_hash.insert(1, (std::u64::MAX, UInt256::MAX));
-        result.lt_hash.insert(2, (std::u64::MAX, UInt256::MAX)); // claimed_proc_lt_hash
+        result.lt_hash.insert(0, (u64::MIN, UInt256::MAX));
+        result.lt_hash.insert(1, (u64::MAX, UInt256::MAX));
+        result.lt_hash.insert(2, (u64::MAX, UInt256::MAX)); // claimed_proc_lt_hash
         result
     }
 
@@ -173,7 +173,7 @@ struct ValidateBase {
 
 impl ValidateBase {
     fn shard(&self) -> &ShardIdent {
-        &self.block_id().shard()
+        self.block_id().shard()
     }
     fn block_id(&self) -> &BlockIdExt {
         self.block.id()
@@ -186,7 +186,7 @@ impl ValidateBase {
         if is_fee_msg {
             true
         } else {
-            self.copyleft_msgs.iter().find(|&msg| msg == in_msg).is_some()
+            self.copyleft_msgs.iter().any(|msg| msg == in_msg)
         }
     }
     fn min_shard_ref_mc_seqno(&self) -> u32 {
@@ -234,6 +234,7 @@ impl ValidateQuery {
     fn shard(&self) -> &ShardIdent {
         &self.shard
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         shard: ShardIdent,
         min_mc_seq_no: u32,
@@ -278,11 +279,13 @@ impl ValidateQuery {
 
 
     fn init_base(&mut self) -> Result<ValidateBase> {
-        let mut base = ValidateBase::default();
-        base.next_block_descr = self.next_block_descr.clone();
-        base.is_fake = self.is_fake;
-        base.created_by = self.block_candidate.created_by.clone();
-        base.prev_blocks_ids = std::mem::take(&mut self.prev_blocks_ids);
+        let mut base = ValidateBase {
+            next_block_descr: self.next_block_descr.clone(),
+            is_fake: self.is_fake,
+            created_by: self.block_candidate.created_by.clone(),
+            prev_blocks_ids: std::mem::take(&mut self.prev_blocks_ids),
+            ..Default::default()
+        };
         base.validating_any_candidate = self.validating_any_candidate;
         let block_id = &self.block_candidate.block_id;
         log::info!(target: "validate_query", "({}): validate query for {:#} started", self.next_block_descr, block_id);
@@ -301,7 +304,7 @@ impl ValidateQuery {
                 if block_id.shard().is_masterchain() {
                     soft_reject_query!("cannot merge shards in masterchain")
                 }
-                if !(block_id.shard().is_parent_for(&base.prev_blocks_ids[0].shard()) && block_id.shard().is_parent_for(&base.prev_blocks_ids[1].shard())
+                if !(block_id.shard().is_parent_for(base.prev_blocks_ids[0].shard()) && block_id.shard().is_parent_for(base.prev_blocks_ids[1].shard())
                     && (base.prev_blocks_ids[0].shard().shard_prefix_with_tag() < base.prev_blocks_ids[1].shard().shard_prefix_with_tag())) {
                     soft_reject_query!("the two previous blocks for a merge operation are not siblings or are not children of current shard")
                 }
@@ -474,9 +477,9 @@ impl ValidateQuery {
     }
 
     // extract_collated_data_from
-    fn extract_collated_data_from(base: &mut ValidateBase, croot: Cell, idx: usize) -> Result<()> {
+    fn extract_collated_data_from(base: &mut ValidateBase, croot: &Cell, idx: usize) -> Result<()> {
         match croot.cell_type() {
-            CellType::Ordinary => match TopBlockDescrSet::construct_from_cell(croot) {
+            CellType::Ordinary => match TopBlockDescrSet::construct_from_cell(croot.clone()) {
                 Ok(descr) => if base.top_shard_descr_dict.is_empty() {
                     log::debug!(target: "validate_query", "({}): collated datum #{} is a TopBlockDescrSet", base.next_block_descr, idx);
                     base.top_shard_descr_dict = descr;
@@ -492,7 +495,7 @@ impl ValidateQuery {
                 }
             }
             CellType::MerkleProof => {
-                let merkle_proof = match MerkleProof::construct_from_cell(croot) {
+                let merkle_proof = match MerkleProof::construct_from_cell(croot.clone()) {
                     Err(err) => reject_query!("invalid Merkle proof: {:?}", err),
                     Ok(mp) => mp
                 };
@@ -519,8 +522,7 @@ impl ValidateQuery {
                 Err(err) => reject_query!("cannot deserialize collated data: {}", err)
             };
             // 9. extract/classify collated data
-            for i in 0..collated_roots.len() {
-                let croot = collated_roots[i].clone();
+            for (i, croot) in collated_roots.iter().enumerate() {
                 Self::extract_collated_data_from(base, croot, i)?;
             }
         }
@@ -535,7 +537,7 @@ impl ValidateQuery {
             reject_query!("requested to validate a block referring to an unknown future masterchain block {} < {}",
                 mc_state.state()?.seq_no(), self.min_mc_seq_no)
         }
-        self.try_unpack_mc_state(&base, mc_state)
+        self.try_unpack_mc_state(base, mc_state)
     }
 
     // fn process_mc_state(&mut self, mc_data: &McData, mc_state: &ShardStateStuff) -> Result<()> {
@@ -621,7 +623,7 @@ impl ValidateQuery {
                base.after_split,
                base.info.before_split(),
                &base.prev_blocks_ids,
-               &config_params,
+               config_params,
                &mc_state_extra,
                true,
                base.now()
@@ -811,7 +813,7 @@ impl ValidateQuery {
         id: &BlockIdExt,
     ) -> Result<(TopBlockDescrStuff, usize)> {
         let tsbd = match base.top_shard_descr_dict.get_top_block_descr(id.shard())? {
-            Some(tbd) => TopBlockDescrStuff::new(tbd, &id, base.is_fake, false)?,
+            Some(tbd) => TopBlockDescrStuff::new(tbd, id, base.is_fake, false)?,
             None => reject_query!("no ShardTopBlockDescr for shard {} is present in collated data",
                 id)
         };
@@ -918,7 +920,7 @@ impl ValidateQuery {
             if old.block_id == info.block_id {
                 // shard unchanged ?
                 log::debug!(target: "validate_query", "({}): shard {} unchanged", self.next_block_descr, shard);
-                if !old.basic_info_equal(&info, true, true) {
+                if !old.basic_info_equal(info, true, true) {
                     reject_query!("shard information for block {}  listed in new shard configuration \
                         differs from that present in the old shard configuration for the same block",
                         info.block_id);
@@ -1292,7 +1294,7 @@ impl ValidateQuery {
             Ok(true)
         })?;
         wc_set.iterate_with_keys(|wc_id: i32, wc_info| {
-            if wc_info.active && !base.mc_extra.shards().get(&wc_id)?.is_some() {
+            if wc_info.active && base.mc_extra.shards().get(&wc_id)?.is_none() {
                 reject_query!("workchain {} is active, but is absent from new shard configuration", wc_id)
             }
             Ok(true)
@@ -1372,7 +1374,7 @@ impl ValidateQuery {
 
     fn check_utime_lt(&self, base: &ValidateBase, mc_data: &McData) -> Result<()> {
         CHECK!(&base.config_params, inited);
-        let mut gen_lt = std::u64::MIN;
+        let mut gen_lt = u64::MIN;
 
         for state in &base.prev_states {
             if base.info.start_lt() <= state.state()?.gen_lt() {
@@ -1632,6 +1634,7 @@ impl ValidateQuery {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn precheck_one_transaction(
         base: &ValidateBase, 
         acc_id: &AccountId, 
@@ -1644,7 +1647,7 @@ impl ValidateQuery {
     ) -> Result<Option<(UInt256, bool)>> {
         log::debug!(target: "validate_query", "({}): pre-checking Transaction {}", base.next_block_descr, trans_lt);
         let trans = Transaction::construct_from_cell(trans_root.clone())?;
-        if &trans.account_id() != &acc_id || trans.logical_time() != trans_lt {
+        if trans.account_id() != acc_id || trans.logical_time() != trans_lt {
             reject_query!("transaction {} of {} claims to be transaction {} of {}",
                 trans_lt, acc_id.to_hex_string(), trans.logical_time(), trans.account_id().to_hex_string())
         }
@@ -1652,7 +1655,7 @@ impl ValidateQuery {
             reject_query!("transaction {} of {} claims that current time is {}
                 while the block header indicates {}", trans_lt, acc_id.to_hex_string(), trans.now(), base.now())
         }
-        if &trans.prev_trans_hash() != &prev_trans_hash
+        if trans.prev_trans_hash() != prev_trans_hash
             || &trans.prev_trans_lt() != prev_trans_lt {
             reject_query!("transaction {} of {} claims that the previous transaction was {}:{} \
                 while the correct value is {}:{}", trans_lt, acc_id.to_hex_string(),
@@ -1822,7 +1825,7 @@ impl ValidateQuery {
                     }
                 }
             })?;
-            let hash = calc_remp_msg_ordering_hash(&id, base.prev_blocks_ids.iter());
+            let hash = calc_remp_msg_ordering_hash(id, base.prev_blocks_ids.iter());
             if let Some(prev_hash) = prev_hash {
                 if *prev_hash > hash {
                     reject_query!("external message's hash is less than previous transaction's one");
@@ -1862,7 +1865,7 @@ impl ValidateQuery {
 
     // checks that a ^Transaction refers to a transaction present in the ShardAccountBlocks
     fn is_valid_transaction_ref(base: &ValidateBase, transaction: &Transaction, hash: UInt256) -> Result<()> {
-        match Self::lookup_transaction(base, &transaction.account_id(), transaction.logical_time())? {
+        match Self::lookup_transaction(base, transaction.account_id(), transaction.logical_time())? {
             Some(trans_cell) => if trans_cell != hash {
                 reject_query!("transaction {} of {:x} has a different hash", transaction.logical_time(), transaction.account_id())
             } else {
@@ -2045,7 +2048,7 @@ impl ValidateQuery {
                     by a previous block of this shardchain", env_hash.to_hex_string(), created_lt)
             }
             Self::update_max_processed_lt_hash(base, created_lt, &key.hash)?;
-            return Ok(())
+            Ok(())
         } else {
             reject_query!("imported internal message with hash {} and \
                 previous address {}..., next hop address {} has previous address not belonging to any neighbor",
@@ -2132,17 +2135,17 @@ impl ValidateQuery {
             // msg_import_imm$011 in_msg:^MsgEnvelope transaction:^Transaction fwd_fee:Grams
             // importing and processing an internal message generated in this very block
             InMsg::Immediate(ref info) => {
-                if !base.is_special_in_msg(&in_msg) {
+                if !base.is_special_in_msg(in_msg) {
                     Self::update_max_processed_lt_hash(base, created_lt, key)?;
                 }
-                info.fwd_fee.clone()
+                info.fwd_fee
             }
             // msg_import_fin$100 in_msg:^MsgEnvelope transaction:^Transaction fwd_fee:Grams
             // importing and processing an internal message with destination in this shard
-            InMsg::Final(ref info) => info.fwd_fee.clone(),
+            InMsg::Final(ref info) => info.fwd_fee,
             // msg_import_tr$101 in_msg:^MsgEnvelope out_msg:^MsgEnvelope transit_fee:Grams
             // importing and relaying a (transit) internal message with destination outside this shard
-            InMsg::Transit(ref info) => info.transit_fee.clone(),
+            InMsg::Transit(ref info) => info.transit_fee,
             // msg_import_ihr$010 msg:^(Message Any) transaction:^Transaction ihr_fee:Grams proof_created:^Cell
             InMsg::IHR(_) => reject_query!("InMsg with key {} \
                 is a msg_import_ihr, but IHR messages are not enabled in this version", key.to_hex_string()),
@@ -2162,16 +2165,16 @@ impl ValidateQuery {
         // extract source, current, next hop and destination address prefixes
         let dest_prefix = msg.dst_ref()
             .ok_or_else(|| error!(""))
-            .and_then(|address| AccountIdPrefixFull::checked_prefix(address))
+            .and_then(AccountIdPrefixFull::checked_prefix)
             .map_err(|_| error!("destination of inbound \
                 internal message with hash {:x} is an invalid blockchain address", key))?;
         let src_prefix = msg.src_ref()
             .ok_or_else(|| error!(""))
-            .and_then(|address| AccountIdPrefixFull::checked_prefix(address))
+            .and_then(AccountIdPrefixFull::checked_prefix)
             .map_err(|_| error!("source of inbound \
                 internal message with hash {:x} is an invalid blockchain address", key))?;
-        let cur_prefix  = src_prefix.interpolate_addr_intermediate(&dest_prefix, &env.cur_addr())?;
-        let next_prefix = src_prefix.interpolate_addr_intermediate(&dest_prefix, &env.next_addr())?;
+        let cur_prefix  = src_prefix.interpolate_addr_intermediate(&dest_prefix, env.cur_addr())?;
+        let next_prefix = src_prefix.interpolate_addr_intermediate(&dest_prefix, env.next_addr())?;
         if !(cur_prefix.is_valid() && next_prefix.is_valid()) {
             reject_query!("cannot compute current and next hop addresses of inbound internal message with hash {}",
                 key.to_hex_string())
@@ -2216,7 +2219,7 @@ impl ValidateQuery {
             reject_query!("inbound internal message with hash {} has remaining forwarding fee {} \
                 larger than the original (total) forwarding fee {}", key.to_hex_string(), env.fwd_fee_remaining(), orig_fwd_fee)
         }
-        let out_msg_opt = base.out_msg_descr.get(&key)?;
+        let out_msg_opt = base.out_msg_descr.get(key)?;
         let (out_msg_env, reimport) = match out_msg_opt.as_ref() {
             Some(out_msg) => (
                 out_msg.out_message_cell(),
@@ -2244,7 +2247,7 @@ impl ValidateQuery {
                 if let Some(OutMsg::Immediate(_)) = out_msg_opt.as_ref() {
                     CHECK!(out_msg_env.is_some());
                     CHECK!(reimport.is_some());
-                } else if !base.is_special_in_msg(&in_msg) {
+                } else if !base.is_special_in_msg(in_msg) {
                     reject_query!("inbound internal message with hash {} is a msg_import_imm$011, \
                         but the corresponding OutMsg does not exist, or is not a valid msg_export_imm$010",
                             key.to_hex_string())
@@ -2331,7 +2334,7 @@ impl ValidateQuery {
                 };
                 // perform hypercube routing for this transit message
                 let use_hypercube = !base.config_params.has_capability(GlobalCapabilities::CapOffHypercube);
-                let route_info = perform_hypercube_routing(&next_prefix, &dest_prefix, &base.shard(), use_hypercube)
+                let route_info = perform_hypercube_routing(&next_prefix, &dest_prefix, base.shard(), use_hypercube)
                     .map_err(|err| error!("cannot perform (check) hypercube routing for \
                         transit inbound message with hash {}: src={} cur={} next={} dest={}; \
                         our shard is {} : {}", key.to_hex_string(), src_prefix, cur_prefix,
@@ -2347,8 +2350,8 @@ impl ValidateQuery {
                         envelope containing another message", key.to_hex_string())
                 }
                 // check that the message has been routed according to hypercube routing
-                let tr_cur_prefix  = src_prefix.interpolate_addr_intermediate(&dest_prefix, &tr_env.cur_addr())?;
-                let tr_next_prefix = src_prefix.interpolate_addr_intermediate(&dest_prefix, &tr_env.next_addr())?;
+                let tr_cur_prefix  = src_prefix.interpolate_addr_intermediate(&dest_prefix, tr_env.cur_addr())?;
+                let tr_next_prefix = src_prefix.interpolate_addr_intermediate(&dest_prefix, tr_env.next_addr())?;
                 if tr_cur_prefix != new_cur_prefix || tr_next_prefix != new_next_prefix {
                     reject_query!("InMsg for transit message with hash {} tells us that it has been adjusted to \
                         current address {}... and hext hop address {} while the correct values dictated by hypercube \
@@ -2357,7 +2360,7 @@ impl ValidateQuery {
                 }
                 // check that the collected transit fee with new fwd_fee_remaining equal the original fwd_fee_remaining
                 // (correctness of fwd_fee itself will be checked later)
-                let mut fee = tr_env.fwd_fee_remaining().clone();
+                let mut fee = *tr_env.fwd_fee_remaining();
                 fee.add(&fwd_fee)?;
                 if tr_env.fwd_fee_remaining() > orig_fwd_fee || &fee != env.fwd_fee_remaining() {
                     reject_query!("InMsg for transit message with hash {} declares transit fees of {}, \
@@ -2490,7 +2493,7 @@ impl ValidateQuery {
             // exporting an outbound external message
             OutMsg::External(_) => {
                 let src_prefix = match msg.src_ref() {
-                    Some(src) => AccountIdPrefixFull::prefix(&src)?,
+                    Some(src) => AccountIdPrefixFull::prefix(src)?,
                     None => reject_query!("source of outbound external message with hash {} \
                         is an invalid blockchain address", key.to_hex_string())
                 };
@@ -2527,8 +2530,8 @@ impl ValidateQuery {
         let dest_prefix = AccountIdPrefixFull::checked_prefix(&header.dst).map_err(|_| error!("destination of outbound \
             internal message with hash {} is an invalid blockchain address", key.to_hex_string()))?;
         let env = out_msg.read_out_message()?.unwrap_or_default();
-        let cur_prefix  = src_prefix.interpolate_addr_intermediate(&dest_prefix, &env.cur_addr())?;
-        let next_prefix = src_prefix.interpolate_addr_intermediate(&dest_prefix, &env.next_addr())?;
+        let cur_prefix  = src_prefix.interpolate_addr_intermediate(&dest_prefix, env.cur_addr())?;
+        let next_prefix = src_prefix.interpolate_addr_intermediate(&dest_prefix, env.next_addr())?;
         if !(cur_prefix.is_valid() && next_prefix.is_valid()) {
             reject_query!("cannot compute current and next hop addresses of outbound internal message with hash {}",
                 key.to_hex_string());
@@ -2611,7 +2614,7 @@ impl ValidateQuery {
             // ...
         }
 
-        Self::check_reimport(base, &out_msg, key)?;
+        Self::check_reimport(base, out_msg, key)?;
         let reimport = out_msg.read_reimport_message()?;
 
         // ...
@@ -2642,7 +2645,7 @@ impl ValidateQuery {
                 log::debug!(target: "validate_query", "({}): src: {}, dst: {}, shard: {}", base.next_block_descr, src_prefix, dest_prefix, base.shard());
                 // perform hypercube routing for this new message
                 let use_hypercube = !base.config_params.has_capability(GlobalCapabilities::CapOffHypercube);
-                let route_info = perform_hypercube_routing(&src_prefix, &dest_prefix, &base.shard(), use_hypercube)
+                let route_info = perform_hypercube_routing(&src_prefix, &dest_prefix, base.shard(), use_hypercube)
                     .map_err(|err| error!("cannot perform (check) hypercube routing for \
                         new outbound message with hash {} : {}", key.to_hex_string(), err))?;
                 let new_cur_prefix  = src_prefix.interpolate_addr_intermediate(&dest_prefix, &route_info.0)?;
@@ -2674,8 +2677,8 @@ impl ValidateQuery {
                     let in_env = info.read_in_message()?;
                     CHECK!(Some(in_env.message_cell().clone()), msg_cell_opt);
                     let in_env = info.read_in_message()?;
-                    let in_cur_prefix  = src_prefix.interpolate_addr_intermediate(&dest_prefix, &in_env.cur_addr())?;
-                    let in_next_prefix = src_prefix.interpolate_addr_intermediate(&dest_prefix, &in_env.next_addr())?;
+                    let in_cur_prefix  = src_prefix.interpolate_addr_intermediate(&dest_prefix, in_env.cur_addr())?;
+                    let in_next_prefix = src_prefix.interpolate_addr_intermediate(&dest_prefix, in_env.next_addr())?;
                     if base.shard().contains_full_prefix(&in_cur_prefix) {
                         reject_query!("msg_export_tr OutMsg record with key {} corresponds to msg_import_tr InMsg record \
                             with current imported message address {} inside the current shard \
@@ -2725,8 +2728,8 @@ impl ValidateQuery {
                         reject_query!("hash {:x} != Message hash {:x}", info.in_envelope_message_hash(), key)
                     }
                     let in_env = info.read_in_message()?;
-                    let in_cur_prefix  = src_prefix.interpolate_addr_intermediate(&dest_prefix, &in_env.cur_addr())?;
-                    let in_next_prefix = src_prefix.interpolate_addr_intermediate(&dest_prefix, &in_env.next_addr())?;
+                    let in_cur_prefix  = src_prefix.interpolate_addr_intermediate(&dest_prefix, in_env.cur_addr())?;
+                    let in_next_prefix = src_prefix.interpolate_addr_intermediate(&dest_prefix, in_env.next_addr())?;
                     if !base.shard().contains_full_prefix(&in_cur_prefix) {
                             reject_query!("msg_export_tr_req OutMsg record with key {:x} corresponds to \
                                 msg_import_tr InMsg record with current imported message address {} \
@@ -2870,7 +2873,7 @@ impl ValidateQuery {
         if let Some(key_val) = base.result.lt_hash.get(&1) {
             let (min_enq_lt, min_enq_hash) = key_val.val();
             if min_enq_lt < &claimed_proc_lt
-                || (min_enq_lt == &claimed_proc_lt && !(&claimed_proc_hash < min_enq_hash)) {
+                || (min_enq_lt == &claimed_proc_lt && &claimed_proc_hash >= min_enq_hash) {
                 reject_query!(
                     "the ProcessedInfo claims to have processed all messages only upto ({},{:x}), \
                     but there is a OutMsg enqueuing record for earlier message ({},{:x})",
@@ -2897,7 +2900,7 @@ impl ValidateQuery {
                 pretends to have been created at lt {} but its actual creation lt is {}",
                     key, nb_block_id, created_lt, enq.created_lt())
         }
-        CHECK!(base.shard().contains_full_prefix(&enq.next_prefix()));
+        CHECK!(base.shard().contains_full_prefix(enq.next_prefix()));
 
         let in_msg = base.in_msg_descr.get(&key.hash)?;
         let out_msg = base.out_msg_descr.get(&key.hash)?;
@@ -2913,7 +2916,7 @@ impl ValidateQuery {
                 reject_query!("have an InMsg entry for processing again already processed EnqueuedMsg with key {:x} \
                     of neighbor {}", key, nb_block_id)
             }
-            if base.shard().contains_full_prefix(&enq.cur_prefix()) {
+            if base.shard().contains_full_prefix(enq.cur_prefix()) {
                 // if this message comes from our own outbound queue, we must have dequeued it
                 let deq_hash = match out_msg {
                     None => reject_query!("our old outbound queue contains EnqueuedMsg with key {:x} \
@@ -2998,8 +3001,8 @@ impl ValidateQuery {
     // return true if all queues are processed
     fn check_in_queue(base: &ValidateBase, manager: &MsgQueueManager) -> Result<bool> {
         log::debug!(target: "validate_query", "({}): check_in_queue len: {}", base.next_block_descr, manager.neighbors().len());
-        let mut iter = manager.merge_out_queue_iter(base.shard())?;
-        while let Some(k_v) = iter.next() {
+        let iter = manager.merge_out_queue_iter(base.shard())?;
+        for k_v in iter {
             let (msg_key, enq, lt, nb_block_id) = k_v?;
             if !base.split_queues && !nb_block_id.shard().contains_full_prefix(enq.cur_prefix()) {
                 // this case from shard split result without splitting queues 
@@ -3025,7 +3028,7 @@ impl ValidateQuery {
                 _ => ()
             }
         }
-        return Ok(true)
+        Ok(true)
     }
 
     // checks that all messages imported from our outbound queue into neighbor shards have been dequeued
@@ -3110,6 +3113,7 @@ impl ValidateQuery {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn check_one_transaction(
         base: &ValidateBase,
         config: BlockchainConfig,
@@ -3220,7 +3224,7 @@ impl ValidateQuery {
                     money_exported.add(&header.value)?;
                     money_exported.grams.add(&header.ihr_fee)?;
                     if let Some(msg_env) = out_msg.read_out_message()? {
-                        money_exported.grams.add(&msg_env.fwd_fee_remaining())?;
+                        money_exported.grams.add(msg_env.fwd_fee_remaining())?;
                     }
                     // unpack exported message value (from this transaction)
                 }
@@ -3316,13 +3320,13 @@ impl ValidateQuery {
             }
         }
         // check if account has tick_tock attribute
-        if let Some(ref acc_tick_tock) = account.get_tick_tock() {
+        if let Some(acc_tick_tock) = account.get_tick_tock() {
             let tick_tock = match descr {
                 TransactionDescr::TickTock(ref info) => Some(info.tt.clone()),
                 _ => None
             };
             if is_first && base.shard().is_masterchain() && acc_tick_tock.tick
-                && !tick_tock.as_ref().map(|ref tt| tt.is_tick()).unwrap_or_default()
+                && !tick_tock.as_ref().map(|tt| tt.is_tick()).unwrap_or_default()
                 && !account_create {
                 reject_query!("transaction {} of account {} is the first transaction \
                     for this special tick account in this block, \
@@ -3330,7 +3334,7 @@ impl ValidateQuery {
                         lt, account_addr.to_hex_string())
             }
             if is_last && base.shard().is_masterchain() && acc_tick_tock.tock
-                && !tick_tock.as_ref().map(|ref tt| tt.is_tock()).unwrap_or_default()
+                && !tick_tock.as_ref().map(|tt| tt.is_tock()).unwrap_or_default()
                 && trans.end_status == AccountStatus::AccStateActive {
                 reject_query!("transaction {} of account {} is the last transaction \
                     for this special tock account in this block, \
@@ -3479,7 +3483,7 @@ impl ValidateQuery {
         base.transactions_executed.fetch_add(1, Ordering::Relaxed);
 
         if let Some(copyleft_reward) = &copyleft_reward {
-            base.copyleft_rewards.push((copyleft_reward.address.clone(), copyleft_reward.reward.clone()));
+            base.copyleft_rewards.push((copyleft_reward.address.clone(), copyleft_reward.reward));
         }
 
         // we cannot know prev transaction in executor
@@ -3519,7 +3523,7 @@ impl ValidateQuery {
         let copyleft_reward_after = copyleft_reward.map_or_else(Grams::zero, |copyleft| copyleft.reward);
         right_balance.add(&CurrencyCollection::from_grams(copyleft_reward_after))?;
         right_balance.add(&money_exported)?;
-        right_balance.add(&trans.total_fees())?;
+        right_balance.add(trans.total_fees())?;
         if left_balance != right_balance {
             let _ = Self::prepare_transaction_for_log(
                 &_old_account_root, 
@@ -3542,6 +3546,7 @@ impl ValidateQuery {
     }
 
     // NB: may be run in parallel for different accounts
+    #[allow(clippy::too_many_arguments)]
     fn check_account_transactions(
         base: &ValidateBase,
         config: BlockchainConfig,
@@ -3691,8 +3696,8 @@ impl ValidateQuery {
         }
         let dst_prefix = AccountIdPrefixFull::prefix(dst)?;
         // CHECK!(src_prefix.is_valid() && dst_prefix.is_valid());  // we have checked this for all InMsgDescr
-        let cur_prefix  = src_prefix.interpolate_addr_intermediate(&dst_prefix, &env.cur_addr())?;
-        let next_prefix = src_prefix.interpolate_addr_intermediate(&dst_prefix, &env.next_addr())?;
+        let cur_prefix  = src_prefix.interpolate_addr_intermediate(&dst_prefix, env.cur_addr())?;
+        let next_prefix = src_prefix.interpolate_addr_intermediate(&dst_prefix, env.next_addr())?;
         if cur_prefix != dst_prefix || next_prefix != dst_prefix {
             reject_query!("special message with hash {} has not been routed to its final destination", msg_hash.to_hex_string())
         }
@@ -3752,9 +3757,9 @@ impl ValidateQuery {
             let mut dst = in_msg.read_message()?.dst().ok_or_else(
                 || error!("cannot find dst address in copyleft reward message")
             )?.address();
-            let value = sent_rewards.get(&dst).ok_or_else(
+            let value = *sent_rewards.get(&dst).ok_or_else(
                 || error!("cannot find sended copyleft reward on address {:x}", dst)
-            )?.clone();
+            )?;
             Self::check_special_message(base, Some(in_msg), &CurrencyCollection::from_grams(value), UInt256::construct_from(&mut dst)?)?;
         }
         Ok(())
@@ -3850,10 +3855,7 @@ impl ValidateQuery {
             }
             None => LibDescr::default()
         };
-        let old = match old {
-            Some(old) => old,
-            None => LibDescr::default()
-        };
+        let old = old.unwrap_or_default();
         old.publishers().scan_diff(new.publishers(), |publisher: UInt256, old, new| {
             if old != new {
                 reject_query!("publisher {} in old={} and new={} state", publisher.to_hex_string(), old.is_some(), new.is_some())
@@ -3903,7 +3905,7 @@ impl ValidateQuery {
                 mc_data.state.block_id().seq_no()
             };
             let min_seq_no = match manager.next().min_seqno() {
-                0 => std::u32::MAX,
+                0 => u32::MAX,
                 min_seq_no => min_seq_no
             };
             let ref_mc_seqno = std::cmp::min(
@@ -3935,7 +3937,7 @@ impl ValidateQuery {
                 )
             }
             if !base.split_queues && next_state.underload_history() & 1 != 0 {
-                Self::check_delivered_dequeued(&base, &manager)?;
+                Self::check_delivered_dequeued(base, manager)?;
             }
             if base.after_split || base.after_merge {
                 if (next_state.overload_history() | next_state.underload_history()) & !1 != 0 {
@@ -4441,7 +4443,7 @@ impl ValidateQuery {
             &new.counters,
             |key: UInt256, old, new| self.check_one_block_creator_update(base, &key, old, new)
         ).map_err(|err| error!("invalid BlockCreateStats dictionary in the new state : {}", err))?;
-        for (key, _count) in &self.block_create_count {
+        for key in self.block_create_count.keys() {
             let old_val = old.counters.get(key)?;
             let new_val = new.counters.get(key)?;
             if old_val.is_none() != new_val.is_none() || old_val == new_val {
@@ -4569,7 +4571,7 @@ impl ValidateQuery {
             base.shard(),
             mc_data.mc_state_extra(),
             &self.old_mc_shards,
-            &mc_data.state(),
+            mc_data.state(),
             base.is_fake
         )?;
         self.check_utime_lt(&base, &mc_data)?;
@@ -4690,7 +4692,7 @@ impl ValidateQuery {
         let new_account_root = new_shard_acc.account_cell();
         let config_cell = base.config_params.serialize()?;
         let trans_root = trans.serialize()?;
-        let msg_cell = trans.in_msg_cell().map(|cell| cell.clone()).unwrap_or_default();
+        let msg_cell = trans.in_msg_cell().unwrap_or_default();
         std::fs::write(format!("{}/{}.txt", path, trans_root.repr_hash().to_hex_string()), err.as_bytes())?;
         crate::test_helper::prepare_data_for_executor_test(
             &path, &account_root, &new_account_root, &msg_cell, &trans_root, &config_cell
@@ -4710,8 +4712,8 @@ impl ValidateQuery {
         use ever_block::write_boc;
         log::trace!(target: "validate_reject",
             "acc_before: {}\nacc_after: {}\nconfig: {}\ntrans_origin: {}\ntrans_execute: {}",
-            base64_encode(write_boc(&account_before)?),
-            base64_encode(write_boc(&account_after)?),
+            base64_encode(write_boc(account_before)?),
+            base64_encode(write_boc(account_after)?),
             base64_encode(config.write_to_bytes()?),
             base64_encode(write_boc(&trans.serialize_with_opts(trans.in_msg.serde_opts())?)?),
             base64_encode(write_boc(&trans_execute.serialize_with_opts(trans_execute.in_msg.serde_opts())?)?),

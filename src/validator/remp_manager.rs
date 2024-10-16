@@ -102,7 +102,7 @@ impl RempDelayer {
 
             match h.pop() {
                 Some((tm, id)) => m.remove(&id).map(|msg| (tm,msg)),
-                None => return None
+                None => None
             }
         }).await;
 
@@ -116,7 +116,7 @@ impl RempDelayer {
         }
     }
 
-    pub async fn len(&self) -> usize {
+    pub async fn max_len(&self) -> usize {
         let (h,m) = self.delay_heap.execute_sync(|(h,m)| (h.len(),m.len())).await;
         if h != m {
             log::error!(target: "remp", "Different number of entries in Delay BinaryHeap and Delay HashMap: {} != {}", h, m);
@@ -153,7 +153,7 @@ impl RempDelayer {
             cnt += 1;
             self.delayed_incoming_sender.send(msg)?;
         }
-        log::debug!(target: "remp", "Polling incoming REMP messages delayer: {} forwarded, {} waiting", cnt, self.len().await);
+        log::debug!(target: "remp", "Polling incoming REMP messages delayer: {} forwarded, {} waiting", cnt, self.max_len().await);
         Ok(cnt)
     }
 }
@@ -204,7 +204,7 @@ impl<T: fmt::Display, Q: RempQueue<T>> RempQueueDispatcher<T,Q> {
     }
 
     async fn insert_to_pending_msgs(&self, msg: Arc<T>, shard: &ShardIdent) {
-        self.pending_messages.execute_sync(|msgs| match msgs.get_mut(&shard) {
+        self.pending_messages.execute_sync(|msgs| match msgs.get_mut(shard) {
             Some(v) => v.push_back(msg),
             None => {
                 msgs.insert(shard.clone(), VecDeque::from([msg]));
@@ -224,12 +224,12 @@ impl<T: fmt::Display, Q: RempQueue<T>> RempQueueDispatcher<T,Q> {
 
     /// The function postpone the message until it is requested by poll from proper shard
     async fn reroute_message(&self, msg: Arc<T>, msg_shard: &ShardIdent, required_shard: &ShardIdent) {
-        if self.actual_queues.execute_sync(|aq| aq.contains(&msg_shard)).await {
+        if self.actual_queues.execute_sync(|aq| aq.contains(msg_shard)).await {
             log::trace!(target: "remp",
                 "Received {} message for REMP: {}, wrong message shard {}, required/old shard {}; postponed",
                 self.name, msg, msg_shard, required_shard
             );
-            self.insert_to_pending_msgs(msg.clone(), &msg_shard).await
+            self.insert_to_pending_msgs(msg.clone(), msg_shard).await
         }
         else {
             log::warn!(target: "remp",
@@ -454,7 +454,7 @@ impl RempManager {
                 #[cfg(feature = "telemetry")]
                 engine.remp_core_telemetry().incoming_mutex_metric()
             ),
-            response_sender: response_sender
+            response_sender
         }, RempInterfaceQueues { 
             engine,
             runtime,
@@ -486,7 +486,7 @@ impl RempManager {
                 log::error!(target: "remp", "Cannot poll REMP incoming delayer queue: {}", e);
             }
         }
-        return self.incoming_dispatcher.poll(shard).await;
+        self.incoming_dispatcher.poll(shard).await
     }
 
     pub async fn return_to_incoming(&self, message: Arc<RempMessageWithOrigin>, shard: &ShardIdent) {
@@ -567,10 +567,10 @@ impl RempInterfaceQueues {
     ) {
         let receipt = ton_api::ton::ton_node::RempReceipt::TonNode_RempReceipt (
             ton_api::ton::ton_node::rempreceipt::RempReceipt {
-                message_id: message_id.clone().into(),
+                message_id: message_id.clone(),
                 status: status.clone(),
                 timestamp: 0,
-                source_id: local_key_id.into()
+                source_id: local_key_id
             }
         );
 
@@ -650,6 +650,6 @@ impl RempCoreInterface for RempInterfaceQueues {
             Err(e) =>
                 log::error!(target: "remp", "RempInterfaceQueues: duplicate check for {:x} failed: {:?}", message_id, e)
         }
-        return res
+        res
     }
 }

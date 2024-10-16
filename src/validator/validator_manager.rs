@@ -63,7 +63,7 @@ use crate::validator::validator_utils::PrevBlockHistory;
 
 fn get_session_id_serialize(
     session_info: Arc<GeneralSessionInfo>,
-    vals: &Vec<ValidatorDescr>,
+    vals: &[ValidatorDescr],
     new_catchain_ids: bool
 ) -> catchain::RawBuffer {
     let mut members = Vec::new();
@@ -79,7 +79,7 @@ fn get_session_id_serialize(
             last_key_block_seqno: session_info.key_seqno as i32,
             catchain_seqno: session_info.catchain_seqno as i32,
             config_hash: session_info.opts_hash.clone(),
-            members: members.into()
+            members
         }
         .into_boxed())
     }
@@ -88,7 +88,7 @@ fn get_session_id_serialize(
 /// serialize data and calc sha256
 fn get_session_id(
     session_info: Arc<GeneralSessionInfo>,
-    val_set: &Vec<ValidatorDescr>,
+    val_set: &[ValidatorDescr],
     new_catchain_ids: bool,
 ) -> UInt256 {
     let serialized = get_session_id_serialize(
@@ -103,14 +103,14 @@ fn compute_session_unsafe_serialized(session_id: &UInt256, rotate_id: u32) -> Ve
     let mut unsafe_id_serialized: Vec<u8> = session_id.as_slice().to_vec();
     let mut rotate_id_serialized: Vec<u8> = rotate_id.to_le_bytes().to_vec();
     unsafe_id_serialized.append(&mut rotate_id_serialized);
-    return unsafe_id_serialized
+    unsafe_id_serialized
 }
 
 /// Computes session_id and if unsafe rotation is taking place,
 /// replaces session_id with unsafe rotation session id.
 fn get_session_unsafe_id(
     session_info: Arc<GeneralSessionInfo>,
-    val_set: &Vec<ValidatorDescr>,
+    val_set: &[ValidatorDescr],
     new_catchain_ids: bool,
     prev_block_opt: Option<u32>,
     vm_config: &ValidatorManagerConfig,
@@ -134,7 +134,7 @@ fn get_session_unsafe_id(
             return unsafe_id;
         }
     }
-    return session_id;
+    session_id
 }
 
 fn validator_session_options_serialize(
@@ -230,6 +230,7 @@ impl ValidationStatus {
     }
 }
 
+#[derive(Default)]
 struct ValidatorListStatus {
     known_lists: HashMap<ValidatorListHash, PublicKey>,
     curr: Option<ValidatorListHash>,
@@ -244,7 +245,7 @@ impl ValidatorListStatus {
     }
 
     fn contains_list (&self, list_id: &ValidatorListHash) -> bool {
-        return self.known_lists.contains_key(list_id);
+        self.known_lists.contains_key(list_id)
     }
 
     fn remove_list (&mut self, list_id: &ValidatorListHash) {
@@ -259,9 +260,9 @@ impl ValidatorListStatus {
     }
 
     fn get_local_key (&self) -> Option<PublicKey> {
-        return match &self.curr {
+        match &self.curr {
             None => None,
-            Some(ch) => self.get_list (&ch)
+            Some(ch) => self.get_list (ch)
         }
     }
 
@@ -272,8 +273,8 @@ impl ValidatorListStatus {
         };
 
         match &self.next {
-            Some(next_id) if list_id == next_id => return true,
-            _ => return false
+            Some(next_id) => list_id == next_id,
+            _ => false
         }
     }
 
@@ -283,18 +284,6 @@ impl ValidatorListStatus {
 
     fn get_curr_utime_since(&self) -> &Option<u32> {
         &self.curr_utime_since
-    }
-}
-
-impl Default for ValidatorListStatus {
-    fn default() -> ValidatorListStatus {
-        return ValidatorListStatus {
-            known_lists: HashMap::default(),
-            curr: None,
-            next: None,
-            curr_utime_since: None,
-            next_utime_since: None,
-        }
     }
 }
 
@@ -411,8 +400,6 @@ impl ValidatorManagerImpl {
             *self.verification_listener.lock() = Some(verification_listener);
 
             log::info!(target: "verificator", "Verification manager for validator manager has been initialized");
-
-            return;
         }
     }
 
@@ -462,11 +449,11 @@ impl ValidatorManagerImpl {
                     hex::encode(key.pub_key().unwrap()),
                     hex::encode(key.id().data())
                 );
-                return Ok(Some(list_id));
+                Ok(Some(list_id))
             },
             None => {
                 log::info!(target: "validator_manager", "Local node is not a {} validator", name);
-                return Ok(None);
+                Ok(None)
             }
         }
     }
@@ -487,11 +474,11 @@ impl ValidatorManagerImpl {
 
         metrics::gauge!("in_current_vset_p34", if self.validator_list_status.curr.is_some() { 1 } else { 0 } as f64);
         metrics::gauge!("in_next_vset_p36", if self.validator_list_status.next.is_some() { 1 } else { 0 } as f64);
-        return Ok(!self.validator_list_status.curr.is_none() || !self.validator_list_status.next.is_none());
+        Ok(self.validator_list_status.curr.is_some() || self.validator_list_status.next.is_some())
     }
 
     async fn is_active_shard(&self, shard: &ShardIdent) -> bool {
-        for (_id, group) in self.validator_sessions.iter() {
+        for group in self.validator_sessions.values() {
             if group.shard() == shard {
                 match group.get_status().await {
                     ValidatorGroupStatus::Sync | ValidatorGroupStatus::Active | ValidatorGroupStatus::Countdown { .. } => return true,
@@ -499,14 +486,14 @@ impl ValidatorManagerImpl {
                 }
             }
         }
-        return false;
+        false
     }
 
     async fn garbage_collect_lists(&mut self) -> Result<()> {
         log::trace!(target: "validator_manager", "Garbage collect lists");
         let mut lists_gc = self.validator_list_status.known_hashes();
 
-        for id in self.validator_sessions.values().into_iter() {
+        for id in self.validator_sessions.values() {
             lists_gc.remove(&id.get_validator_list_id());
         }
 
@@ -551,9 +538,9 @@ impl ValidatorManagerImpl {
         };
 
         let mut active_remp_sessions = HashSet::new();
-        for (_group_id,group) in &self.validator_sessions {
+        for group in self.validator_sessions.values() {
             if let Some(qm) = group.get_reliable_message_queue().await {
-                active_remp_sessions.extend(qm.get_sessions().into_iter());
+                active_remp_sessions.extend(qm.get_sessions());
             }
         }
 
@@ -627,7 +614,7 @@ impl ValidatorManagerImpl {
         general_session_info: Arc<GeneralSessionInfo>,
         full_validator_set: &ValidatorSet,
         mc_state: &ShardStateStuff,
-        prev_blocks: &Vec<BlockIdExt>,
+        prev_blocks: &[BlockIdExt],
     ) -> Result<SessionValidatorsList> {
         let catchain_config = self.read_catchain_config(mc_state)?;
         if general_session_info.catchain_seqno <= 1 /* && check for actual validator set */ {
@@ -641,8 +628,8 @@ impl ValidatorManagerImpl {
                 blk.shard().clone(), general_session_info.catchain_seqno - 1
             ));
             let prev_subset = match try_calc_subset_for_workchain(
-                &full_validator_set,
-                &mc_state,
+                full_validator_set,
+                mc_state,
                 &prev_session_info.shard,
                 prev_session_info.catchain_seqno,
                 blk.seq_no(),
@@ -660,12 +647,12 @@ impl ValidatorManagerImpl {
                 }
             };
 
-            let prev_block_seqno_opt = prev_blocks.get(0).map(|x| x.seq_no);
+            let prev_block_seqno_opt = prev_blocks.first().map(|x| x.seq_no);
             let prev_session_id = get_session_unsafe_id(
                 prev_session_info.clone(),
                 &prev_subset.validators,
                 true,
-                prev_block_seqno_opt.clone(),
+                prev_block_seqno_opt,
                 &self.config
             );
 
@@ -716,7 +703,7 @@ impl ValidatorManagerImpl {
         &self,
         full_validator_set: &ValidatorSet,
         mc_state: &ShardStateStuff,
-        prev_blocks: &Vec<BlockIdExt>,
+        prev_blocks: &[BlockIdExt],
         next_session_info: Arc<GeneralSessionInfo>,
         next_session_id: &UInt256
     ) -> Result<Arc<SessionValidatorsList>> {
@@ -819,8 +806,9 @@ impl ValidatorManagerImpl {
         log::debug!(target: "validator_manager", "Validation enabled: status {:?}", validation_status);
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_sessions(&mut self,
-        new_shards: &HashMap<ShardIdent, Vec<BlockIdExt>>,
+        new_shards: HashMap<ShardIdent, Vec<BlockIdExt>>,
         our_current_shards: &mut HashMap<ShardIdent, ValidatorSet>,
         keyblock_seqno: u32,
         session_options: validator_session::SessionOptions,
@@ -851,7 +839,7 @@ impl ValidatorManagerImpl {
 
         let do_unsafe_catchain_rotate = self.config.check_unsafe_catchain_rotation(
             Some(last_masterchain_block.seq_no), mc_state_extra.validator_info.catchain_seqno
-        ) != None;
+        ).is_some();
 
         log::trace!(target: "validator_manager", "Starting/updating sessions {}",
             if do_unsafe_catchain_rotate {"(unsafe rotate)"} else {""}
@@ -860,7 +848,7 @@ impl ValidatorManagerImpl {
         let remp_enabled = !do_unsafe_catchain_rotate
             && is_remp_enabled(self.engine.clone(), mc_state_extra.config());
 
-        for (ident, prev_blocks) in new_shards.iter() {
+        for (ident, prev_blocks) in new_shards {
             let cc_seqno_from_state = if ident.is_masterchain() {
                 *master_cc_range.end()
             } else {
@@ -873,12 +861,13 @@ impl ValidatorManagerImpl {
                 ident, cc_seqno_from_state
             );
 
+            let prev = PrevBlockHistory::new_prevs(ident.clone(), prev_blocks);
             let subset = match try_calc_subset_for_workchain(
                 &full_validator_set,
-                &mc_state,
-                ident,
+                mc_state,
+                &ident,
                 cc_seqno,
-                PrevBlockHistory::new_prevs(ident, prev_blocks).get_next_seqno().unwrap_or_default()
+                prev.get_next_seqno().unwrap_or_default()
             )? {
                 Some(x) => x,
                 None => {
@@ -902,12 +891,12 @@ impl ValidatorManagerImpl {
                 max_vertical_seqno: 0
             });
 
-            let prev_block_seqno_opt = prev_blocks.get(0).map(|x| x.seq_no);
+            let prev_block_seqno_opt = prev.get_prevs().first().map(|x| x.seq_no);
             let session_id = get_session_unsafe_id(
                 general_session_info.clone(),
-                &vsubset.list().to_vec(),
+                vsubset.list(),
                 true,
-                prev_block_seqno_opt.clone(),
+                prev_block_seqno_opt,
                 &self.config
             );
 
@@ -919,8 +908,8 @@ impl ValidatorManagerImpl {
 
             let prev_sessions = self.compute_prev_sessions_list(
                 &full_validator_set,
-                &mc_state,
-                prev_blocks,
+                mc_state,
+                prev.get_prevs(),
                 general_session_info.clone(),
                 &session_id
             ).await?;
@@ -992,22 +981,20 @@ impl ValidatorManagerImpl {
                         slashing_manager,
                         verification_manager,
                     ))
-                );
+                ).clone();
 
                 let session_status = session.get_status().await;
-                let session_clone = session.clone();
                 if session_status == ValidatorGroupStatus::Created {
                     log::trace!(target: "validator_manager", "Current shard {}, session {:x}: starting", ident, session_id);
 
                     if let Some(remp_manager) = &self.remp_manager {
                         remp_manager.add_active_shard(session.shard()).await;
                     }
-                    ValidatorGroup::start_with_status(
-                        session_clone,
+                    session.start_with_status(
                         &prev_sessions.get_validator_list()?,
                         &vsubset,
                         group_start_status,
-                        prev_blocks.clone(),
+                        prev.get_prevs().to_vec(),
                         last_masterchain_block.clone(),
                         SystemTime::UNIX_EPOCH + Duration::from_secs(mc_now.as_u32() as u64),
                         master_cc_range,
@@ -1044,7 +1031,7 @@ impl ValidatorManagerImpl {
             mc_state_extra.last_key_block.as_ref().map(|id| id.seq_no).expect("masterchain state must contain info about previous key block")
         };
         let mc_now: UnixTime32 = mc_state.state()?.gen_time().into();
-        let (session_options, opts_hash) = self.compute_session_options(&mc_state_extra).await?;
+        let (session_options, opts_hash) = self.compute_session_options(mc_state_extra).await?;
         let catchain_config = self.read_catchain_config(&mc_state)?;
 
         self.enable_validation();
@@ -1057,20 +1044,20 @@ impl ValidatorManagerImpl {
         }
 
         // update verification manager (create / destroy depends on SMFT capabilities)
-        self.update_verification_manager_usage(&mc_state_extra);
+        self.update_verification_manager_usage(mc_state_extra);
 
         let master_cc_seqno = get_masterchain_seqno(self.engine.clone(), &mc_state).await?;
         if let Some(remp) = &self.remp_manager {
             if last_masterchain_block.seq_no == 0 {
                 remp.create_master_cc_session(master_cc_seqno, mc_now, vec!())?;
             }
-            if last_masterchain_block.seq_no > 0 && rotate_all_shards(&mc_state_extra) {
+            if last_masterchain_block.seq_no > 0 && rotate_all_shards(mc_state_extra) {
                 let (_block_info, tops) = get_block_info_by_id(self.engine.clone(), last_masterchain_block).await?;
                 remp.create_master_cc_session(master_cc_seqno, mc_now, tops)?;
             }
         }
 
-        self.update_validation_status(&mc_state, &mc_state_extra).await?;
+        self.update_validation_status(&mc_state, mc_state_extra).await?;
 
         let mut master_cc_range = master_cc_seqno..=master_cc_seqno; // Todo: compute always
         if let Some(remp) = &self.remp_manager {
@@ -1184,16 +1171,14 @@ impl ValidatorManagerImpl {
         let next_validator_set = mc_state_extra.config.next_validator_set()?;
         let full_validator_set = mc_state_extra.config.validator_set()?;
         let possible_validator_change = next_validator_set.total() > 0;
-        let mut mc_validators = Vec::new();
-        
-        mc_validators.reserve(full_validator_set.total() as usize);
+        let mut mc_validators = Vec::with_capacity(full_validator_set.total() as usize);
 
         for ident in future_shards.iter() {
             log::trace!(target: "validator_manager", "Future shard {}", ident);
             let (cc_seqno_from_state, cc_lifetime) = if ident.is_masterchain() {
                 (master_cc_seqno, catchain_config.mc_catchain_lifetime)
             } else {
-                (mc_state_extra.shards().calc_shard_cc_seqno(&ident)?, catchain_config.shard_catchain_lifetime)
+                (mc_state_extra.shards().calc_shard_cc_seqno(ident)?, catchain_config.shard_catchain_lifetime)
             };
 
             let near_validator_change = possible_validator_change &&
@@ -1210,7 +1195,7 @@ impl ValidatorManagerImpl {
                 &full_validator_set
             };
 
-            let vnext_list_id = match compute_validator_list_id(&future_validator_set.list(), None)? {
+            let vnext_list_id = match compute_validator_list_id(future_validator_set.list(), None)? {
                 None => continue,
                 Some(l) => l
             };
@@ -1236,7 +1221,7 @@ impl ValidatorManagerImpl {
         //     };
 
             let next_subset_opt = try_calc_subset_for_workchain_standard(
-                &future_validator_set, mc_state.config_params()?, ident, next_cc_seqno)?;
+                future_validator_set, mc_state.config_params()?, ident, next_cc_seqno)?;
 
             let next_subset = match next_subset_opt {
                 Some(x) => x,
@@ -1265,7 +1250,7 @@ impl ValidatorManagerImpl {
         let validation_status = self.engine.validation_status();
         if validation_status.allows_validate() {
             self.start_sessions(
-                &new_shards,
+                new_shards,
                 &mut our_current_shards,
                 keyblock_seqno,
                 session_options,
@@ -1273,7 +1258,7 @@ impl ValidatorManagerImpl {
                 &mut gc_validator_sessions,
                 mc_now,
                 &mc_state,
-                &mc_state_extra,
+                mc_state_extra,
                 &master_cc_range,
                 last_masterchain_block
             ).await?;
@@ -1300,15 +1285,16 @@ impl ValidatorManagerImpl {
                     &wc.validators,
                     true,
                 );
+                let vsubset = wc.compute_validator_set(*next_cc_seqno)?;
                 gc_validator_sessions.remove(&session_id);
-                if !self.validator_sessions.contains_key(&session_id) {
+                self.validator_sessions.entry(session_id.clone()).or_insert_with(|| {
                     let verification_manager = self.verification_manager.lock().clone();
-                    let session = Arc::new(ValidatorGroup::new(
+                    Arc::new(ValidatorGroup::new(
                         new_session_info,
                         local_id,
                         session_id.clone(),
                         next_val_list_id.clone(),
-                        wc.compute_validator_set(*next_cc_seqno)?,
+                        vsubset,
                         session_options,
                         self.remp_manager.clone(),
                         self.engine.clone(),
@@ -1316,14 +1302,13 @@ impl ValidatorManagerImpl {
                         #[cfg(feature = "slashing")]
                         self.slashing_manager.clone(),
                         verification_manager
-                    ));
-                    self.validator_sessions.insert(session_id, session);
-                }
+                    ))
+                });
             }
         }
         if !mc_state.config_params()?.has_capability(GlobalCapabilities::CapNoSplitOutQueue) {
             let mut precalc_split_queues_for: HashSet<BlockIdExt> = HashSet::new();
-            for (_, session) in &self.validator_sessions {
+            for session in self.validator_sessions.values() {
                 for id in &blocks_before_split {
                     if id.shard().is_parent_for(session.shard()) {
                         log::trace!(
@@ -1446,7 +1431,7 @@ impl ValidatorManagerImpl {
             }
         }
 
-        if rotate_all_shards(&mc_state_extra) {
+        if rotate_all_shards(mc_state_extra) {
             log::info!(target: "validator_manager", "New last rotation block: {}", last_masterchain_block);
             self.engine.save_last_rotation_block_id(last_masterchain_block)?;
         }
@@ -1516,7 +1501,7 @@ impl ValidatorManagerImpl {
         let upper_state = self.engine.load_state(upper_id).await?;
         let rp_guarantee = remp_manager.calc_rp_guarantee(&self.read_catchain_config(&upper_state)?);
 
-        let (upper_info, _loop_inf_shards) = get_block_info_by_id(self.engine.clone(), &upper_id).await?;
+        let (upper_info, _loop_inf_shards) = get_block_info_by_id(self.engine.clone(), upper_id).await?;
         let mut loop_info = upper_info.clone();
         let mut loop_id = upper_id.clone();
         let mut rotation_blocks = HashMap::new();
@@ -1572,15 +1557,13 @@ impl ValidatorManagerImpl {
         let observer = RempMasterblockObserver::create_and_start(
             self.engine.clone(), remp_manager.message_cache.clone(), self.rt.clone(), handle.clone()
         )?;
-        observer.process_master_block_range(&lwb_block, &initialization_upb_block).await?;
+        observer.process_master_block_range(&lwb_block, initialization_upb_block).await?;
 
         Ok(Some(observer))
     }
 
     async fn has_long_enough_replay_protection_history(&mut self, initialization_upb_block: &BlockIdExt) -> Result<bool> {
-        match {
-            self.find_initial_mc_range(&initialization_upb_block).await
-        } {
+        match self.find_initial_mc_range(initialization_upb_block).await {
             Err(e) => {
                 log::warn!(target: "validator_manager", "Error finding initial replay protection range: '{}'; waiting for more data ...", e);
                 Ok(false)
@@ -1603,10 +1586,8 @@ impl ValidatorManagerImpl {
                 "Validator manager initialization: last rotation block: {}",
                 id
             );
-            let mc_handle = self.engine.load_block_handle(&id)?.ok_or_else(
-                || error!("Cannot load handle for master block {}", id)
-            )?;
-            mc_handle
+            self.engine.load_block_handle(&id)?
+                .ok_or_else(|| error!("Cannot load handle for master block {}", id))?
         } else {
             log::info!(target: "validator_manager",
                 "Validator manager initialization: no last rotation block, using last applied block: {}", last_applied_block_id
@@ -1693,10 +1674,10 @@ impl ValidatorManagerImpl {
         }
 
         match run_validate_query_any_candidate(block_candidate.clone(), engine).await {
-            Ok(_time) => return true,
+            Ok(_time) => true,
             Err(err) => {
                 log::warn!(target: "verificator", "Block {:?} verification error: {:?}", candidate_id, err);
-                return false;
+                false
             }
         }
     }

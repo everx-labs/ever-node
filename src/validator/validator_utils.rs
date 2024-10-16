@@ -26,7 +26,7 @@ use ever_block::{
 };
 use ever_block::CatchainConfig;
 use std::{collections::HashMap, fmt::Debug, hash::Hash, sync::Arc};
-use std::fmt::{Display, Formatter};
+use std::fmt::{Display, Formatter, Write};
 use ton_api::ton::engine::validator::validator::groupmember::GroupMember;
 use validator_session::{BlockHash, SessionNode};
 
@@ -52,9 +52,9 @@ pub fn make_cryptosig_pair(
 pub fn pairvec_to_cryptopair_vec(
     vec: Vec<(PublicKeyHash, BlockPayloadPtr)>,
 ) -> Result<Vec<CryptoSignaturePair>> {
-    return vec.into_iter().
-        map(|p| make_cryptosig_pair(p)).
-        collect();
+    vec.into_iter().
+        map(make_cryptosig_pair).
+        collect()
 }
 
 #[allow(dead_code)]
@@ -66,7 +66,7 @@ pub fn pairvec_to_puresigs(
         let pair = make_cryptosig_pair(p)?;
         pure_sigs.add_sigpair(pair);
     }
-    return Ok(pure_sigs);
+    Ok(pure_sigs)
 }
 
 #[allow(dead_code)]
@@ -78,7 +78,7 @@ pub fn pairvec_val_to_sigs(
     let vset_catchain_seqno = vset.catchain_seqno();
     let vset_hash = ValidatorSet::calc_subset_hash_short(vset.list(), vset_catchain_seqno)?;
     let vset_info = ValidatorBaseInfo::with_params(vset_hash, vset_catchain_seqno);
-    return Ok(BlockSignatures::with_params(vset_info, pure_sigs));
+    Ok(BlockSignatures::with_params(vset_info, pure_sigs))
 }
 
 pub fn check_crypto_signatures(signatures: &BlockSignaturesPure, validators_list: &[ValidatorDescr], data: &[u8]) -> Result<u64> {
@@ -129,8 +129,8 @@ pub fn validator_query_candidate_to_validator_block_candidate(
             file_hash: candidate.block_id.file_hash,
         },
         collated_file_hash: candidate.collated_file_hash,
-        data: catchain::CatchainFactory::create_block_payload(candidate.data.into()),
-        collated_data: catchain::CatchainFactory::create_block_payload(candidate.collated_data.into()),
+        data: catchain::CatchainFactory::create_block_payload(candidate.data),
+        collated_data: catchain::CatchainFactory::create_block_payload(candidate.collated_data),
     }
 }
 
@@ -196,7 +196,7 @@ pub fn compute_validator_list_id(
 //     fail!("Key {} not found in validator set {:?}", key.id(), set)
 // }
 
-pub fn get_validator_key_idx(public_key: &PublicKey, nodes: &Vec<CatchainNode>) -> Result<usize> {
+pub fn get_validator_key_idx(public_key: &PublicKey, nodes: &[CatchainNode]) -> Result<usize> {
     let key_id = public_key.id();
     match nodes.iter().position(|validator| validator.public_key.id() == key_id) {
         Some(idx) => Ok(idx),
@@ -378,7 +378,7 @@ pub fn try_calc_subset_for_workchain(
 
     let _ = block_seqno;
 
-    return try_calc_subset_for_workchain_standard(vset, config, shard_id, cc_seqno);
+    try_calc_subset_for_workchain_standard(vset, config, shard_id, cc_seqno)
 }
 
 pub fn calc_subset_for_masterchain(
@@ -427,7 +427,7 @@ pub async fn get_shard_by_message(engine: Arc<dyn EngineOperations>, message: Ar
     Ok(shard)
 }
 
-pub fn get_group_members_by_validator_descrs(iterator: &Vec<ValidatorDescr>, dst: &mut Vec<GroupMember>)  {
+pub fn get_group_members_by_validator_descrs(iterator: &[ValidatorDescr], dst: &mut Vec<GroupMember>)  {
     for descr in iterator.iter() {
         let node_id = descr.compute_node_id_short();
         let adnl_id = descr.adnl_addr.clone().unwrap_or(node_id.clone());
@@ -440,11 +440,11 @@ pub fn get_group_members_by_validator_descrs(iterator: &Vec<ValidatorDescr>, dst
 }
 
 pub fn is_remp_enabled(_engine: Arc<dyn EngineOperations>, config_params: &ConfigParams) -> bool {
-    return config_params.has_capability(GlobalCapabilities::CapRemp);
+    config_params.has_capability(GlobalCapabilities::CapRemp)
 }
 
 pub fn is_smft_enabled(_engine: Arc<dyn EngineOperations>, config_params: &ConfigParams) -> bool {
-    return config_params.has_capability(GlobalCapabilities::CapSmft);
+    config_params.has_capability(GlobalCapabilities::CapSmft)
 }
 
 pub fn get_message_uid(msg: &Message) -> UInt256 {
@@ -506,17 +506,18 @@ impl PrevBlockHistory {
         }
     }
 
-    pub fn new_prevs(shard: &ShardIdent, prevs: &Vec<BlockIdExt>) -> Self {
+    pub fn new_prevs(shard: ShardIdent, prev: Vec<BlockIdExt>) -> Self {
+        let next_seqno = get_first_block_seqno_after_prevs(&prev);
         Self {
-            shard: shard.clone(),
-            prev: prevs.clone(),
-            next_seqno: get_first_block_seqno_after_prevs(prevs)
+            shard,
+            prev,
+            next_seqno
         }
     }
 
-    pub fn update_prev(&mut self, prev: &Vec<BlockIdExt>) {
-        self.prev = prev.clone();
-        self.next_seqno = get_first_block_seqno_after_prevs(&self.prev);
+    pub fn update_prev(&mut self, prev: Vec<BlockIdExt>) {
+        self.next_seqno = get_first_block_seqno_after_prevs(&prev);
+        self.prev = prev;
     }
 
     pub fn get_next_seqno(&self) -> Option<u32> {
@@ -527,7 +528,7 @@ impl PrevBlockHistory {
         fmt_next_block_descr_from_next_seqno(&self.shard, self.next_seqno, rh)
     }
 
-    pub fn get_prevs(&self) -> &Vec<BlockIdExt> {
+    pub fn get_prevs(&self) -> &[BlockIdExt] {
         &self.prev
     }
 
@@ -561,8 +562,11 @@ impl PrevBlockHistory {
     }
 }
 
-pub fn prevs_to_string(prev_block_ids: &Vec<BlockIdExt>) -> String {
-    prev_block_ids.iter().map(|x| format!(" {} ", x)).collect()
+pub fn prevs_to_string(prev_block_ids: &[BlockIdExt]) -> String {
+    prev_block_ids.iter().fold(String::new(), |mut res, x| {
+        let _ = write!(res, "{} ", x);
+        res
+    })
 }
 
 impl Display for PrevBlockHistory {
@@ -571,7 +575,7 @@ impl Display for PrevBlockHistory {
     }
 }
 
-pub fn get_first_block_seqno_after_prevs(prevs: &Vec<BlockIdExt>) -> Option<u32> {
+pub fn get_first_block_seqno_after_prevs(prevs: &[BlockIdExt]) -> Option<u32> {
     prevs.iter().map(|blk| blk.seq_no).max().map(|x| x + 1)
 }
 
@@ -608,15 +612,15 @@ pub struct LockfreeMapSet<K, V> where V: Ord, V: Clone+Debug, K: Clone+Hash+Ord+
 
 impl<K,V> LockfreeMapSet<K,V> where V: Ord, V: Clone+Debug, K: Clone+Hash+Ord+Debug {
     #[allow(dead_code)]
-    fn remove_and_sort(src: &Vec<V>, old_to_remove: &V) -> Vec<V> {
+    fn remove_and_sort(src: &[V], old_to_remove: &V) -> Vec<V> {
         let mut canonized: Vec<V> = src.iter().filter(|x| *x != old_to_remove).cloned().collect();
         canonized.sort();
         canonized
     }
 
-    fn insert_and_sort(src: &Vec<V>, new_to_insert: &V) -> Vec<V> {
-        let mut canonized = src.clone();
-        if canonized.iter().find(|x| *x == new_to_insert) == None {
+    fn insert_and_sort(src: &[V], new_to_insert: &V) -> Vec<V> {
+        let mut canonized = src.to_vec();
+        if !canonized.iter().any(|x| x == new_to_insert) {
             canonized.push(new_to_insert.clone());
         }
         canonized.sort();
@@ -673,7 +677,7 @@ impl<K,V> LockfreeMapSet<K,V> where V: Ord, V: Clone+Debug, K: Clone+Hash+Ord+De
 
     #[allow(dead_code)]
     pub fn get_lowest(&self, msg_uid: &K) -> Option<V> {
-        self.map.get(msg_uid).map(|v| v.value().get(0).cloned()).flatten()
+        self.map.get(msg_uid).and_then(|v| v.value().first().cloned())
     }
 
     #[allow(dead_code)]

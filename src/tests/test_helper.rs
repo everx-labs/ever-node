@@ -91,16 +91,12 @@ pub fn are_shard_states_equal(ss1: &ShardStateStuff, ss2: &ShardStateStuff) -> b
             false
         }
     } else {
-        if ss2.shard_state_extra().is_ok() {
-            false
-        } else {
-            true
-        }
+        ss2.shard_state_extra().is_err()
     } 
 }
 
 fn compare_block_accounts(acc1: &ShardAccountBlocks, acc2: &ShardAccountBlocks) -> Result<()> {
-    acc1.scan_diff_with_aug(&acc2, |key, acc_cur_1, acc_cur_2| {
+    acc1.scan_diff_with_aug(acc2, |key, acc_cur_1, acc_cur_2| {
         dbg!(&key);
         if let (Some((acc1, cur1)), Some((acc2, cur2))) = (&acc_cur_1, &acc_cur_2) {
             acc1.transactions().scan_diff_with_aug(acc2.transactions(), |lt, tr_cur1, tr_cur2| {
@@ -288,10 +284,10 @@ pub fn gen_master_state(
 ) -> (BlockIdExt, Arc<ShardStateStuff>) {
     let mut ss = ShardStateUnsplit::with_ident(ShardIdent::masterchain());
     for account in accounts {
-        let account_id = UInt256::from(account.get_id().unwrap().get_next_hash().unwrap());
+        let account_id = account.get_id().unwrap().get_next_hash().unwrap();
         ss.insert_account(
             &account_id, 
-            &ShardAccount::with_params(&account, UInt256::default(), 0).unwrap()
+            &ShardAccount::with_params(account, UInt256::default(), 0).unwrap()
         ).unwrap();
     }
     let mut ms = McStateExtra::default();
@@ -328,8 +324,8 @@ pub fn gen_master_state(
     let cell = ss.serialize().unwrap();
     let bytes = write_boc(&cell).unwrap();
     #[cfg(feature = "telemetry")]
-    let telemetry = telemetry.unwrap_or_else(|| create_engine_telemetry());
-    let allocated = allocated.unwrap_or_else(|| create_engine_allocated());
+    let telemetry = telemetry.unwrap_or_else(create_engine_telemetry);
+    let allocated = allocated.unwrap_or_else(create_engine_allocated);
     if let Some(master_state_id) = master_state_id {
         let master_state = ShardStateStuff::deserialize_state(
             master_state_id.clone(), 
@@ -368,17 +364,17 @@ pub fn gen_shard_state(
     let mut ss = ShardStateUnsplit::with_ident(ShardIdent::full(0));
     ss.set_master_ref(master_ref);
     for account in accounts {
-        let account_id = UInt256::from(account.get_id().unwrap().get_next_hash().unwrap());
+        let account_id = account.get_id().unwrap().get_next_hash().unwrap();
         ss.insert_account(
             &account_id, 
-            &ShardAccount::with_params(&account, UInt256::default(), 0).unwrap()
+            &ShardAccount::with_params(account, UInt256::default(), 0).unwrap()
         ).unwrap();
     }
     let cell = ss.serialize().unwrap();
     let bytes = write_boc(&cell).unwrap();
     #[cfg(feature = "telemetry")]
-    let telemetry = telemetry.unwrap_or_else(|| create_engine_telemetry());
-    let allocated = allocated.unwrap_or_else(|| create_engine_allocated());
+    let telemetry = telemetry.unwrap_or_else(create_engine_telemetry);
+    let allocated = allocated.unwrap_or_else(create_engine_allocated);
     if let Some(shard_state_id) = shard_state_id {
         let shard_state = ShardStateStuff::deserialize_state(
             shard_state_id.clone(), 
@@ -469,7 +465,7 @@ fn serialize_boc(cell: &Cell, path: &str, name: &str) -> Result<()> {
 
 pub async fn test_async(      
     test: impl Fn() -> Pinned<'static, ()>,
-    done: impl Fn() -> () 
+    done: impl Fn() 
 ) {
     let ret = test().await;
     done();
@@ -527,7 +523,7 @@ impl TestEngine {
         let shard_blocks = db.load_all_top_shard_blocks().unwrap_or_default();
         let last_mc_seqno = db
             .load_full_node_state(LAST_APPLIED_MC_BLOCK)?
-            .map(|id| id.seq_no as u32)
+            .map(|id| id.seq_no)
             .unwrap_or_default();
         let (shard_blocks, _) = ShardBlocksPool::new(
             shard_blocks, 
@@ -555,8 +551,8 @@ impl TestEngine {
     }
 
     pub async fn change_mc_state(&self, mc_state_id: &BlockIdExt) -> Result<()> {
-        let mc_state = self.db.load_shard_state_dynamic(&mc_state_id)?;
-        self.save_last_applied_mc_block_id(&mc_state_id)?;
+        let mc_state = self.db.load_shard_state_dynamic(mc_state_id)?;
+        self.save_last_applied_mc_block_id(mc_state_id)?;
         self.shard_blocks.update_shard_blocks(&mc_state).await?;
         Ok(())
     }
@@ -645,8 +641,8 @@ impl TestEngine {
         // let (validator_set, _) = mc_state.read_cur_validator_set_and_cc_conf()?;
         let mut cc_seqno_with_delta = 0;
         let nodes = compute_validator_set_cc(
-            &*mc_state,
-            &block_id.shard(),
+            &mc_state,
+            block_id.shard(),
             block_id.seq_no(),
             cc_seqno_from_state,
             &mut cc_seqno_with_delta
@@ -675,7 +671,7 @@ impl TestEngine {
                 &block_stuff,
                 signatures,
                 &mc_state,
-                &prev_blocks_ids,
+                prev_blocks_ids.clone(),
                 &*engine
             ).await?;
             if let Some(tbd) = tbd_opt {
@@ -709,10 +705,11 @@ impl TestEngine {
     
         log::info!("TRY COLLATE block {}, min_mc_seqno {}", block_stuff.id(), min_mc_seqno);
     
+        let prev = PrevBlockHistory::new_prevs(block_stuff.id().shard().clone(), prev_blocks_ids.clone());
         let collator = Collator::new(
             block_stuff.id().shard().clone(),
             min_mc_seqno,
-            &PrevBlockHistory::new_prevs(&block_stuff.id().shard(), &prev_blocks_ids),
+            &prev,
             validator_set.clone(),
             extra.created_by().clone(),
             self.clone(),
@@ -730,21 +727,21 @@ impl TestEngine {
             let su2 = new_block.read_state_update()?;
 
             std::fs::write(
-                &format!("{}/update.txt", res_path), 
+                format!("{}/update.txt", res_path), 
                 format!("old: {:#.1024}\nnew: {:#.1024}", su1.old, su1.new)
             )?;
             std::fs::write(
-                &format!("{}/update_candidate.txt", res_path), 
+                format!("{}/update_candidate.txt", res_path), 
                 format!("old: {:#.1024}\nnew: {:#.1024}", su2.old, su2.new)
             )?;
 
             // let shard = block_stuff.id().shard().shard_key(false);
             // let shard = format!("{:x}-{}", shard, block_stuff.id().seq_no());
 
-            block_stuff.block()?.write_to_file(&format!("{}/block_real.boc", res_path))?;
-            new_block.write_to_file(&format!("{}/block_candidate.boc", res_path))?;
+            block_stuff.block()?.write_to_file(format!("{}/block_real.boc", res_path))?;
+            new_block.write_to_file(format!("{}/block_candidate.boc", res_path))?;
             std::fs::write(
-                &format!("{}/collated_data.bin", res_path), 
+                format!("{}/collated_data.bin", res_path), 
                 &block_candidate.collated_data
             )?;
 
@@ -767,11 +764,11 @@ impl TestEngine {
 
             let state_stuff = self.load_state(block_stuff.id()).await?;
             std::fs::write(
-                &format!("{}/state_real.txt", res_path), 
+                format!("{}/state_real.txt", res_path), 
                 debug_state(state_stuff.state()?.clone())?
             )?;
             std::fs::write(
-                &format!("{}/state_candidate.txt", res_path), 
+                format!("{}/state_candidate.txt", res_path), 
                 debug_state(new_state.clone())?
             )?;
 
@@ -1054,8 +1051,8 @@ impl EngineOperations for TestEngine {
         debug_assert!(!pre_apply);
         log::debug!(target: "nodese", "apply_block {}", handle.id());
         apply_block(
-            &handle, 
-            &block,  
+            handle, 
+            block,  
             mc_seq_no, 
             &(self.clone() as Arc<dyn EngineOperations>), 
             pre_apply,
@@ -1138,7 +1135,7 @@ impl EngineOperations for TestEngine {
                 ..Default::default()
             };
         };
-        &*COLLATOR_CONFIG
+        &COLLATOR_CONFIG
     }
 
 }

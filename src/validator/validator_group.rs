@@ -122,6 +122,7 @@ impl Drop for ValidatorGroupImpl {
 
 impl ValidatorGroupImpl {
     // Creates and starts session
+    #[allow(clippy::too_many_arguments)]
     fn start(
         &mut self,
         session_listener: validator_session::SessionListenerPtr,
@@ -129,7 +130,7 @@ impl ValidatorGroupImpl {
         min_masterchain_block_id: BlockIdExt,
         min_ts: SystemTime,
         g: Arc<ValidatorGroup>,
-        prev_validators: &Vec<ValidatorDescr>,
+        prev_validators: &[ValidatorDescr],
         next_validator_set: &ValidatorSet,
         master_cc_range: &RangeInclusive<u32>,
         start_remp_session: bool,
@@ -143,7 +144,7 @@ impl ValidatorGroupImpl {
 
         log::info!(target: "validator", "Starting session {} (start remp: {})", self.info(), start_remp_session);
 
-        self.prev_block_ids.update_prev(&prev);
+        self.prev_block_ids.update_prev(prev);
         self.min_masterchain_block_id = Some(min_masterchain_block_id.clone());
         self.min_ts = min_ts;
 
@@ -206,7 +207,7 @@ impl ValidatorGroupImpl {
                     g.validator_list_id.clone(),
                     master_cc_range,
                     prev_validators,
-                    &next_validator_set.list().to_vec()
+                    next_validator_set.list()
                 ) {
                     log::error!(target: "remp", "Cannot create queue for {}: {}", g.general_session_info, error);
                 };
@@ -235,29 +236,29 @@ impl ValidatorGroupImpl {
         );
 
         self.session_ptr = Some(session_ptr);
-        return Ok(())
+        Ok(())
     }
 
     pub fn _session_ptr(&self) -> Option<SessionPtr> {
-        return self.session_ptr.clone();
+        self.session_ptr.clone()
     }
 
     pub fn info_round(&self, round: u32) -> String {
         let next_seqno = self.prev_block_ids
             .get_next_seqno()
             .map_or("".to_owned(), |seqno| format!(", {} next seqno", seqno));
-        return format!(
+        format!(
             "session_status: id {:x}, shard {}{}, {}, round {}, prevs {}",
             self.session_id, self.shard, next_seqno, self.status, round, self.prev_block_ids
-        );
+        )
     }
 
     pub fn get_master_cc_range(&self) -> Option<RangeInclusive<u32>> {
-        self.reliable_queue.as_ref().map(|q| q.get_master_cc_range()).flatten()
+        self.reliable_queue.as_ref().and_then(|q| q.get_master_cc_range())
     }
 
     pub fn info(&self) -> String {
-        return self.info_round(self.last_known_round);
+        self.info_round(self.last_known_round)
     }
 
     // Initializes structure
@@ -287,7 +288,7 @@ impl ValidatorGroupImpl {
     }
 
 /*
-    pub fn update_next_validator_set(&mut self, catchain_seqno: u32, curr_set: &Vec<ValidatorDescr>, next_set: &Vec<ValidatorDescr>) {
+    pub fn update_next_validator_set(&mut self, catchain_seqno: u32, curr_set: &[ValidatorDescr], next_set: &[ValidatorDescr]) {
         self.reliable_queue.switch_queue(catchain_seqno, curr_set, next_set);
     }
  */
@@ -295,7 +296,7 @@ impl ValidatorGroupImpl {
     pub fn update_round(&mut self, round: u32) -> (u32, PrevBlockHistory, Option<BlockIdExt>, SystemTime)
     {
         self.last_known_round = max(self.last_known_round, round);
-        return (self.last_known_round, self.prev_block_ids.clone(), self.min_masterchain_block_id.clone(), self.min_ts)
+        (self.last_known_round, self.prev_block_ids.clone(), self.min_masterchain_block_id.clone(), self.min_ts)
     }
 }
 
@@ -326,6 +327,7 @@ pub struct ValidatorGroup {
 }
 
 impl ValidatorGroup {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         general_session_info: Arc<GeneralSessionInfo>,
         local_key: PrivateKey,
@@ -390,9 +392,10 @@ impl ValidatorGroup {
         Arc::downgrade(&self.callback)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_with_status(
         self: Arc<ValidatorGroup>,
-        prev_validators: &Vec<ValidatorDescr>,
+        prev_validators: &[ValidatorDescr],
         next_validators: &ValidatorSet,
         validation_start_status: ValidatorGroupStatus,
         prev: Vec<BlockIdExt>,
@@ -402,10 +405,10 @@ impl ValidatorGroup {
         start_remp_session: bool,
         rt: tokio::runtime::Handle
     ) -> Result<()> {
-        let prev_validators_cloned = prev_validators.clone();
+        let prev_validators_cloned = prev_validators.to_vec();
         let next_validators_cloned = next_validators.clone();
         let master_cc_range_cloned = master_cc_range.clone();
-        self.set_status(validation_start_status.clone()).await?;
+        self.set_status(validation_start_status).await?;
         rt.clone().spawn (async move {
             if let ValidatorGroupStatus::Countdown { start_at } = validation_start_status {
                 log::trace!(target: "validator", "Session delay started: {}", self.info().await);
@@ -442,7 +445,7 @@ impl ValidatorGroup {
 
     pub async fn add_next_validators(
         self: Arc<ValidatorGroup>, 
-        prev_validators: &Vec<ValidatorDescr>,
+        prev_validators: &[ValidatorDescr],
         next_validator_set: &ValidatorSet,
         new_session_info: Arc<GeneralSessionInfo>,
         next_master_cc_range: &RangeInclusive<u32>,
@@ -460,7 +463,7 @@ impl ValidatorGroup {
             rmq.add_new_queue(
                 next_master_cc_range,
                 prev_validators,
-                &next_validator_set.list().to_vec(),
+                next_validator_set.list(),
                 new_session_info,
                 self.validator_list_id.clone()
             ).await?;
@@ -587,7 +590,7 @@ impl ValidatorGroup {
         match self.get_master_cc_range().await {
             None => {
                 self.set_status(ValidatorGroupStatus::Active).await?;
-                return Ok(true)
+                Ok(true)
                 //fail!("Shard {} history cannot be known: master_cc_range is unavailable")
             }
             Some(mc_range) => {
@@ -666,7 +669,7 @@ impl ValidatorGroup {
 
         let (rh,fh) = match &result {
             Err(_) => (UInt256::default(), UInt256::default()),
-            Ok(candidate) => (candidate.id.root_hash.clone(), get_hash(&candidate.data.data()))
+            Ok(candidate) => (candidate.id.root_hash.clone(), get_hash(candidate.data.data()))
         };
 
         let next_block_id = self.group_impl.execute_sync(|group_impl|
@@ -681,7 +684,7 @@ impl ValidatorGroup {
             }
         }
         else {
-            format!("no external messages processed")
+            "no external messages processed".to_string()
         };
 
         let result_message = match &result {
@@ -689,7 +692,7 @@ impl ValidatorGroup {
                 let now = UnixTime32::now().as_u32() as u64;
                 self.last_collation_time.fetch_max(now, Ordering::Relaxed);
 
-                format!("Collation successful")
+                "Collation successful".to_string()
             }
             Err(x) => {
                 format!("Collation failed: `{}`", x)
@@ -828,13 +831,13 @@ impl ValidatorGroup {
             candidate_id, self.info_round(round).await);
 
         let candidate_block_id = self.group_impl.execute_sync(|group_impl|
-            group_impl.prev_block_ids.get_next_block_id(&root_hash, &get_hash(&data.data()))
+            group_impl.prev_block_ids.get_next_block_id(&root_hash, &get_hash(data.data()))
         ).await;
 
         let candidate = super::BlockCandidate {
             block_id: candidate_block_id, //BlockIdExt::with_params(self.shard().clone(), 0, root_hash, get_hash(&data.data())),
             data: data.data().to_vec(),
-            collated_file_hash: catchain::utils::get_hash (&collated_data.data()),
+            collated_file_hash: catchain::utils::get_hash (collated_data.data()),
             collated_data: collated_data.data().to_vec(),
             created_by: UInt256::from(source.pub_key().expect("source must contain pub_key")),
         };
@@ -885,6 +888,7 @@ impl ValidatorGroup {
     //self.accept_block_candidate (round, source, root_hash, file_hash, data, signatures, approve_signatures);
     //signatures: Vec<(PublicKeyHash, BlockPayloadPtr)>,
     //approve_signatures: Vec<(PublicKeyHash, BlockPayloadPtr)>)
+    #[allow(clippy::too_many_arguments)]
     pub async fn on_block_committed(
         &self,
         round: u32,
@@ -930,12 +934,12 @@ impl ValidatorGroup {
 
         let mut result = run_accept_block_query(
             next_block_id.clone(),
-            if data_vec.len() > 0 {
+            if !data_vec.is_empty() {
                 Some(data_vec)
             } else {
                 None
             },
-            prev_block_history.get_prevs().clone(),
+            prev_block_history.get_prevs().to_vec(),
             self.validator_set.clone(),
             sig_set,
             approve_sig_set,
@@ -962,7 +966,7 @@ impl ValidatorGroup {
                 // TODO: retry block commit
             };
 
-            group_impl.prev_block_ids.update_prev(&vec!(next_block_id));
+            group_impl.prev_block_ids.update_prev(vec!(next_block_id));
 
             (full_result, group_impl.prev_block_ids.display_prevs())
         }).await;
@@ -1022,7 +1026,7 @@ impl ValidatorGroup {
 
         let result = self.load_block_candidate(&root_hash).await;
         let result_txt = match &result {
-            Ok(_) => format!("Ok"),
+            Ok(_) => "Ok".to_string(),
             Err(err) => format!("Candidate not found: {}", err)
         };
         log::info!(
@@ -1039,7 +1043,7 @@ impl ValidatorGroup {
         log::debug!(
             target: "validator", 
             "({}): ValidatorGroup::on_slashing_statistics round {}, stat {:?}",
-            self.get_next_block_descr().await,
+            self.get_next_block_descr(None).await,
             round, stat
         );
         #[cfg(feature = "slashing")]

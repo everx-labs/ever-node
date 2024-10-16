@@ -31,12 +31,8 @@ pub(crate) fn compute_hash_from_buffer(data: &[u8]) -> HashType {
 }
 
 pub(crate) fn compute_hash_from_buffer_u32(data: &[u32]) -> HashType {
-    let (head, body, tail) = unsafe { data.align_to::<u8>() };
-
-    assert!(head.is_empty());
-    assert!(tail.is_empty());
-
-    compute_hash_from_buffer(body)
+    let data: &[u8] = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
+    compute_hash_from_buffer(data)
 }
 
 pub(crate) fn compute_hash_from_bytes(data: &::ton_api::ton::bytes) -> HashType {

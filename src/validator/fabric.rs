@@ -101,6 +101,7 @@ pub async fn run_validate_query_any_candidate(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_validate_query(
     shard: ShardIdent,
     _min_ts: SystemTime,
@@ -133,7 +134,7 @@ pub async fn run_validate_query(
         ValidateQuery::new(
             shard.clone(),
             min_masterchain_block_id.seq_no(),
-            prev.get_prevs().clone(),
+            prev.get_prevs().to_vec(),
             block,
             set,
             engine.clone(),
@@ -146,7 +147,7 @@ pub async fn run_validate_query(
         let query = ValidateQuery::new(
             shard.clone(),
             min_masterchain_block_id.seq_no(),
-            prev.get_prevs().clone(),
+            prev.get_prevs().to_vec(),
             block.clone(),
             set,
             engine.clone(),
@@ -164,7 +165,7 @@ pub async fn run_validate_query(
                     let path = test_bundles_config.path().to_string();
                     let engine = engine.clone();
                     let shard = shard.clone();
-                    let prev_vec = prev.get_prevs().clone();
+                    let prev_vec = prev.get_prevs().to_vec();
                     tokio::spawn(
                         async move {
                             match CollatorTestBundle::build_for_validating_block(
@@ -209,6 +210,7 @@ pub async fn run_validate_query(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_accept_block_query(
     id: BlockIdExt,
     data: Option<Vec<u8>>,
@@ -234,6 +236,7 @@ pub async fn run_accept_block_query(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_collate_query (
     shard: ShardIdent,
     _min_ts: SystemTime,
@@ -276,7 +279,7 @@ pub async fn run_collate_query (
         Ok((candidate, _)) => {
             metrics::increment_counter!("successful_collations", &labels);
 
-            return Ok(validator_query_candidate_to_validator_block_candidate(collator_id, candidate))
+            Ok(validator_query_candidate_to_validator_block_candidate(collator_id, candidate))
         }
         Err(err) => {
             let labels = [("shard", shard.to_string())];
@@ -292,31 +295,29 @@ pub async fn run_collate_query (
             #[cfg(feature = "telemetry")]
             engine.collator_telemetry().failed_attempt(&shard, &err_str);
 
-            if test_bundles_config.is_enable() {
-                if test_bundles_config.need_to_build_for(&err_str) {
-                    let id = prev.get_next_block_id(&UInt256::default(), &UInt256::default());
-                    let prev_vec = prev.get_prevs().clone();
+            if test_bundles_config.is_enable() && test_bundles_config.need_to_build_for(&err_str) {
+                let id = prev.get_next_block_id(&UInt256::default(), &UInt256::default());
+                let prev_vec = prev.get_prevs().to_vec();
 
-                    if !CollatorTestBundle::exists(test_bundles_config.path(), &id) {
-                        let path = test_bundles_config.path().to_string();
-                        let engine = engine.clone();
-                        tokio::spawn(async move {
-                            match CollatorTestBundle::build_for_collating_block(prev_vec, &engine).await {
-                                Err(e) => log::error!("({}): Error while test bundle for {} building: {}", next_block_descr, id, e),
-                                Ok(mut b) => {
-                                    b.set_notes(err_str.to_string());
-                                    if let Err(e) = b.save(&path) {
-                                        log::error!("({}): Error while test bundle for {} saving: {}", next_block_descr, id, e);
-                                    } else {
-                                        log::info!("({}): Built test bundle for {}", next_block_descr, id);
-                                    }
+                if !CollatorTestBundle::exists(test_bundles_config.path(), &id) {
+                    let path = test_bundles_config.path().to_string();
+                    let engine = engine.clone();
+                    tokio::spawn(async move {
+                        match CollatorTestBundle::build_for_collating_block(prev_vec.to_vec(), &engine).await {
+                            Err(e) => log::error!("({}): Error while test bundle for {} building: {}", next_block_descr, id, e),
+                            Ok(mut b) => {
+                                b.set_notes(err_str.to_string());
+                                if let Err(e) = b.save(&path) {
+                                    log::error!("({}): Error while test bundle for {} saving: {}", next_block_descr, id, e);
+                                } else {
+                                    log::info!("({}): Built test bundle for {}", next_block_descr, id);
                                 }
                             }
-                        });
-                    }
+                        }
+                    });
                 }
             }
-            return Err(err);
+            Err(err)
         }
     }
 }

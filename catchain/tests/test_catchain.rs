@@ -25,7 +25,7 @@ use storage::db::rocksdb::destroy_rocks_db;
 
 const DB_PATH: &str = "../target/test";
 
-struct DummyCatchainListener {}
+struct DummyCatchainListener;
 
 impl CatchainListener for DummyCatchainListener {
     fn preprocess_block(&self, block: BlockPtr) {
@@ -61,7 +61,7 @@ impl CatchainListener for DummyCatchainListener {
 
 impl DummyCatchainListener {
     fn new() -> Arc<dyn CatchainListener + Send + Sync> {
-        Arc::new(DummyCatchainListener {})
+        Arc::new(Self)
     }
 }
 
@@ -117,7 +117,7 @@ async fn test_catchain_creation() {
             None => (),
         }
     }
-    let local_key = &source_ids[0].public_key;
+    let local_key = source_ids[0].public_key.clone();
 
     let catchain_listener = DummyCatchainListener::new();
     let options = Options::default();
@@ -127,7 +127,7 @@ async fn test_catchain_creation() {
     let catchain = CatchainFactory::create_catchain(
         &options,
         &session_id,
-        &source_ids,
+        source_ids,
         &local_key,
         db_path,
         db_suffix,

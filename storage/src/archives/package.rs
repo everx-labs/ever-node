@@ -130,7 +130,7 @@ impl Package {
         after_append: impl FnOnce(u64, u64) -> Result<()>
     ) -> Result<()> {
         assert!(entry.filename().as_bytes().len() <= u16::max_value() as usize);
-        assert!(entry.data().len() <= u32::max_value() as usize);
+        assert!(entry.data().len() <= u32::MAX as usize);
 
         let mut file = self.open_file().await?;
         {

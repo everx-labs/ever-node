@@ -116,8 +116,8 @@ impl PackageEntry {
         &self.filename
     }
 
-    pub const fn data(&self) -> &Vec<u8> {
-        &self.data
+    pub fn data(&self) -> &[u8] {
+        self.data.as_slice()
     }
 
     pub fn take_data(self) -> Vec<u8> {

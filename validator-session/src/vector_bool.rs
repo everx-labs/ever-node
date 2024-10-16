@@ -53,6 +53,10 @@ impl BoolVector for BoolVectorImpl {
         self.len
     }
 
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     fn at(&self, index: usize) -> bool {
         assert!(index <= self.len);
 
@@ -270,7 +274,7 @@ impl BoolVectorImpl {
         (self.data[index / 32] & mask) != 0
     }
 
-    fn set_bit_raw(data: &mut Vec<u32>, index: usize, value: bool) {
+    fn set_bit_raw(data: &mut [u32], index: usize, value: bool) {
         let mask: u32 = 1u32 << (index % 32);
         if value {
             data[index / 32] |= mask;

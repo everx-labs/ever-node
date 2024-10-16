@@ -64,7 +64,7 @@ impl PackageId {
 
     #[allow(dead_code)]
     pub const fn is_empty(&self) -> bool {
-        self.id == u32::max_value()
+        self.id == u32::MAX
     }
 
     pub fn path(&self) -> PathBuf {

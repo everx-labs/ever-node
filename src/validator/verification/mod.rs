@@ -73,15 +73,16 @@ pub trait VerificationManager: Sync + Send {
     ) -> bool;
 
     /// Update workchains
-    async fn update_workchains<'a>(
-        &'a self,
+    #[allow(clippy::too_many_arguments)]
+    async fn update_workchains(
+        &self,
         local_key_id: PublicKeyHash,
         local_bls_key: PrivateKey,
         workchain_id: i32,
         utime_since: u32,
-        workchain_validators: &'a Vec<ValidatorDescr>,
-        mc_validators: &'a Vec<ValidatorDescr>,
-        listener: &'a VerificationListenerPtr,
+        workchain_validators: &[ValidatorDescr],
+        mc_validators: &[ValidatorDescr],
+        listener: &VerificationListenerPtr,
         use_debug_bls_keys: bool,
     );
 }

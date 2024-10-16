@@ -240,7 +240,7 @@ async fn test_get_all_config_params() {
         }
     ).await.unwrap();
 
-    let config_params = ConfigParams::construct_from_bytes(&answer.config_proof()).unwrap();
+    let config_params = ConfigParams::construct_from_bytes(answer.config_proof()).unwrap();
     let param0 = config_params.config(0).unwrap().unwrap();
     let param0 = match param0 {
         ConfigParamEnum::ConfigParam0(param) => param,
@@ -369,14 +369,14 @@ async fn test_getaccount() {
     let answer: ShardAccountState = request(
         &mut client, GetShardAccountState {account_address: account2.clone()}
     ).await.unwrap();
-    assert_eq!(answer.shard_account().is_some(), true);
+    assert!(answer.shard_account().is_some());
 
     let mut client = recreate_client(Some(client)).await;
 
     let answer: ShardAccountMeta = request(
         &mut client, GetShardAccountMeta {account_address: account2.clone()}
     ).await.unwrap();
-    assert_eq!(answer.shard_account_meta().is_some(), true);
+    assert!(answer.shard_account_meta().is_some());
 
     let mut client = recreate_client(Some(client)).await;
 
@@ -542,7 +542,7 @@ async fn test_control_send_message() {
     ).await.unwrap();
 
     let _answer: ton_api::ton::engine::validator::Success = request(
-        &mut client, ton::rpc::lite_server::SendMessage {body: body.into()}
+        &mut client, ton::rpc::lite_server::SendMessage {body}
     ).await.unwrap();
     client.shutdown().await.unwrap();
     control.shutdown().await;
@@ -801,11 +801,11 @@ async fn test_stats() {
         }
         add_ethalon(&mut ethalon_stats, "validation_status", "\"Active\"");
 
-        let mut mask = u32::MAX >> (32 - ethalon_stats.iter().count());
+        let mut mask = u32::MAX >> (32 - ethalon_stats.len());
         for stat in stats.stats().deref() {
             let ethalon = ethalon_stats
                 .get(&stat.key as &str)
-                .expect(&format!("Key {} is not found in Stats ethalon", stat.key));
+                .unwrap_or_else(|| panic!("Key {} is not found in Stats ethalon", stat.key));
             if (mask & ethalon.mask) == 0 {
                 panic!("Doubled stat {} in Stat reply", stat.key)
             } else {
@@ -829,12 +829,8 @@ async fn test_stats() {
                         )
                 },
                 _ => value_ok(&stat.value, ethalon.val)
-            }.expect(
-                &format!(
-                    "Value for key {} does not match: {}, expected {}",
-                    stat.key, stat.value, ethalon.val
-                )
-            )
+            }.unwrap_or_else(|| panic!("Value for key {} does not match: {}, expected {}",
+                    stat.key, stat.value, ethalon.val))
         }
 
         if mask != 0 {

@@ -12,7 +12,9 @@
 */
 
 use crate::{
-    block::BlockStuff, engine_traits::{EngineAlloc, EngineOperations}, 
+    block::BlockStuff,
+    engine::SplitQueues,
+    engine_traits::{EngineAlloc, EngineOperations}, 
     shard_state::ShardStateStuff, types::top_block_descr::TopBlockDescrStuff,
     validator::{
         accept_block::create_top_shard_block_description, BlockCandidate,
@@ -238,7 +240,7 @@ pub struct CollatorTestBundle {
     telemetry: Arc<EngineTelemetry>,
     allocated: Arc<EngineAlloc>,
     collator_config: CollatorConfig,
-    split_queues_cache: lockfree::map::Map<BlockIdExt, Option<(OutMsgQueue, OutMsgQueue, HashSet<UInt256>)>>,
+    split_queues_cache: lockfree::map::Map<BlockIdExt, SplitQueues>,
 }
 
 #[allow(dead_code)]
@@ -966,7 +968,7 @@ impl CollatorTestBundle {
                     &block,
                     BlockSignatures::with_params(base_info, signatures),
                     &mc_state, // TODO
-                    &prev_blocks_ids,
+                    prev_blocks_ids,
                     engine.deref(),
                 ).await? {
                 let tbd = TopBlockDescrStuff::new(tbd, block_id, true, false).unwrap();
@@ -1301,12 +1303,11 @@ impl EngineOperations for CollatorTestBundle {
         _: &Arc<ShardStateStuff>,
         _: Option<&mut u32>,
     ) -> Result<Vec<Arc<TopBlockDescrStuff>>> {
-        if self.top_shard_blocks.len() > 0 {
+        if !self.top_shard_blocks.is_empty() {
             return Ok(self.top_shard_blocks.clone());
         } else if let Some(candidate) = self.candidate() {
             let collated_roots = read_boc(&candidate.collated_data)?.roots;
-            for i in 0..collated_roots.len() {
-                let croot = collated_roots[i].clone();
+            for croot in collated_roots {
                 if croot.cell_type() == CellType::Ordinary {
                     let mut res = vec!();
                     let top_shard_descr_dict = TopBlockDescrSet::construct_from_cell(croot)?;
@@ -1360,10 +1361,7 @@ impl EngineOperations for CollatorTestBundle {
         );
     }
 
-    fn get_split_queues(
-        &self,
-        before_split_block: &BlockIdExt
-    ) -> Option<(OutMsgQueue, OutMsgQueue, HashSet<UInt256>)> {
+    fn get_split_queues(&self, before_split_block: &BlockIdExt) -> SplitQueues {
         if let Some(guard) = self.split_queues_cache.get(before_split_block) {
             if let Some(q) = guard.val() {
                 return Some(q.clone())

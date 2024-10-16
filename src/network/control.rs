@@ -257,7 +257,7 @@ impl ControlQuerySubscriber {
             .ok_or_else(|| error!("Cannot load shard_client_mc_block_id"))?;
         let mut applied_blocks = engine.load_state(&shards_mc_block_id).await?.top_blocks_all()?;
         applied_blocks.push(mc_block_id.as_ref().clone());
-        Ok(AppliedShardsInfoBoxed::Raw_AppliedShardsInfo(AppliedShardsInfo { shards: applied_blocks.into() }))
+        Ok(AppliedShardsInfoBoxed::Raw_AppliedShardsInfo(AppliedShardsInfo { shards: applied_blocks }))
     }
 
     fn convert_sync_status(&self, sync_status: u32 ) -> String {
@@ -342,7 +342,7 @@ impl ControlQuerySubscriber {
             sync_status
         );
         if let DataSource::Status(_) = &self.data_source {
-            return Ok(Stats {stats: stats.into()})
+            return Ok(Stats {stats})
         }
 
         let engine = self.engine()?;
@@ -352,7 +352,7 @@ impl ControlQuerySubscriber {
             id
         } else {
             Self::add_stats(&mut stats, "masterchainblock", "\"not set\"");
-            return Ok(Stats {stats: stats.into()})
+            return Ok(Stats {stats})
         };
 
         let mc_block_handle = engine.load_block_handle(&mc_block_id)?
@@ -481,7 +481,7 @@ impl ControlQuerySubscriber {
 
         Self::add_stats(&mut stats, "validation_status", format!("\"{:?}\"", engine.validation_status()));
 
-        Ok(Stats { stats: stats.into() })
+        Ok(Stats { stats })
 
     }
 
@@ -733,9 +733,7 @@ impl ControlQuerySubscriber {
         };
         let query = match query.downcast::<GetFutureBundle>() {
             Ok(query) => {
-                let prev_block_ids = query.prev_block_ids.iter().map(
-                    |id| id.clone()
-                ).collect();
+                let prev_block_ids = query.prev_block_ids.to_vec();
                 return QueryResult::consume_boxed(
                     self.prepare_future_bundle(prev_block_ids).await?,
                     #[cfg(feature = "telemetry")]
@@ -757,7 +755,7 @@ impl ControlQuerySubscriber {
         };
         let query = match query.downcast::<ton::rpc::lite_server::GetConfigParams>() {
             Ok(query) => {
-                let param_number = query.param_list.iter().next().ok_or_else(|| error!("Invalid param_number"))?;
+                let param_number = query.param_list.first().ok_or_else(|| error!("Invalid param_number"))?;
                 let answer = self.get_config_params(*param_number as u32).await?;
 
                 return QueryResult::consume_boxed(

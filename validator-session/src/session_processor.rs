@@ -1451,7 +1451,7 @@ impl CompletionHandlerProcessor for SessionProcessorImpl {
 
         self.next_completion_handler_available_index += 1;
 
-        const MAX_COMPLETION_HANDLER_INDEX: CompletionHandlerId = std::u64::MAX;
+        const MAX_COMPLETION_HANDLER_INDEX: CompletionHandlerId = u64::MAX;
 
         assert!(self.next_completion_handler_available_index < MAX_COMPLETION_HANDLER_INDEX);
 

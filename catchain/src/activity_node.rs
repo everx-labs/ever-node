@@ -194,7 +194,7 @@ impl ActivityNodeManager {
 
     /// Generate node ID
     fn generate_id(&mut self) -> NodeId {
-        const MAX_ID: NodeId = std::u64::MAX;
+        const MAX_ID: NodeId = u64::MAX;
 
         assert!(self.current_node_id < MAX_ID);
 

@@ -66,7 +66,7 @@ use crate::validator::{
 #[cfg(feature = "telemetry")]
 use crate::{
     engine_traits::EngineTelemetry, full_node::telemetry::{FullNodeTelemetry, RempClientTelemetry},
-    network::telemetry::{FullNodeNetworkTelemetry, FullNodeNetworkTelemetryKind},
+    network::telemetry::FullNodeNetworkTelemetry,
     validator::telemetry::{CollatorValidatorTelemetry, RempCoreTelemetry},
 };
 
@@ -108,6 +108,7 @@ const MAX_VALIDATED_BLOCK_STATS_ENTRIES_COUNT: usize = 10000;
 #[path = "tests/test_engine.rs"]
 mod tests;
 
+pub type SplitQueues = Option<(OutMsgQueue, OutMsgQueue, HashSet<UInt256>)>;
 pub struct Engine {
     db: Arc<InternalDb>,
     #[cfg(feature = "external_db")]
@@ -153,8 +154,8 @@ pub struct Engine {
     processed_workchain: Option<i32>,
 
     // None - queue calculating is in progress
-    split_queues_cache: lockfree::map::Map<BlockIdExt, Option<(OutMsgQueue, OutMsgQueue, HashSet<UInt256>)>>,
-    validation_status: Arc<AtomicU8>,
+    split_queues_cache: lockfree::map::Map<BlockIdExt, SplitQueues>,
+    validation_status: AtomicU8,
     last_validation_time: lockfree::map::Map<ShardIdent, u64>,
     last_collation_time: lockfree::map::Map<ShardIdent, u64>,
     #[cfg(feature = "slashing")]
@@ -270,6 +271,7 @@ impl Downloader for BlockDownloader {
                     None
                 } else {
                     match context.engine.db.load_block_proof(&handle, is_link).await {
+                        #[allow(clippy::if_same_then_else)]
                         Err(e) => if is_link && !handle.has_proof_link() {
                             None
                         } else if !is_link && !handle.has_proof() {
@@ -346,7 +348,7 @@ impl Downloader for BlockProofDownloader {
         if let Some(handle) = context.engine.db.load_block_handle(context.id)? {
             let mut is_link = false;
             if handle.has_proof_or_link(&mut is_link) {
-                return Ok(context.engine.db.load_block_proof(&handle, is_link).await?);
+                return context.engine.db.load_block_proof(&handle, is_link).await;
             }
         }
         context.client.download_block_proof(
@@ -464,6 +466,7 @@ impl Downloader for NextMeshUpdateDownloader {
     }
 }
 
+#[derive(Default)]
 pub struct Stopper {
     stop: Arc<AtomicU32>,
     token: tokio_util::sync::CancellationToken
@@ -776,8 +779,7 @@ impl Engine {
         log::info!("load_node_state");
         let last_mc_seqno = db
             .load_full_node_state(LAST_APPLIED_MC_BLOCK)?
-            .map(|id| id.seq_no as u32)
-            .unwrap_or_default();
+            .map_or(0, |id| id.seq_no);
         let (shard_blocks_pool, shard_blocks_receiver) = ShardBlocksPool::new(
             shard_blocks, 
             last_mc_seqno, 
@@ -902,7 +904,7 @@ impl Engine {
             shard_states_keeper: shard_states_keeper.clone(),
             processed_workchain,
             split_queues_cache: lockfree::map::Map::new(),
-            validation_status: Arc::new(AtomicU8::new(0)),
+            validation_status: AtomicU8::new(0),
             last_validation_time: lockfree::map::Map::new(),
             last_collation_time: lockfree::map::Map::new(),
             #[cfg(feature = "slashing")]
@@ -910,7 +912,7 @@ impl Engine {
             #[cfg(feature = "slashing")]
             validated_block_stats_receiver,
             #[cfg(feature = "telemetry")]
-            full_node_telemetry: FullNodeTelemetry::new(),
+            full_node_telemetry: FullNodeTelemetry::default(),
             #[cfg(feature = "telemetry")]
             remp_core_telemetry,
             #[cfg(feature = "telemetry")]
@@ -918,8 +920,7 @@ impl Engine {
             #[cfg(feature = "telemetry")]
             validator_telemetry: CollatorValidatorTelemetry::default(),
             #[cfg(feature = "telemetry")]
-            full_node_service_telemetry: 
-                FullNodeNetworkTelemetry::new(FullNodeNetworkTelemetryKind::Service),
+            full_node_service_telemetry: FullNodeNetworkTelemetry::new_service(),
             #[cfg(feature = "telemetry")]
             engine_telemetry,
             #[cfg(feature = "telemetry")]
@@ -930,7 +931,7 @@ impl Engine {
                 Self::TIMEOUT_TELEMETRY_SEC,
                 metrics
             ),
-            tps_counter: TpsCounter::new(),
+            tps_counter: TpsCounter::default(),
             mesh_client: tokio::sync::OnceCell::new()
         });
 
@@ -1202,7 +1203,7 @@ impl Engine {
     }
 
     pub fn remp_service(&self) -> Option<&RempService> {
-        self.remp_service.as_ref().map(|arc| arc.deref())
+        self.remp_service.as_deref()
     }
 
     pub fn remp_client(&self) -> Option<&RempClient> {
@@ -1237,9 +1238,7 @@ impl Engine {
         self.smft_capability.store(value, Ordering::Relaxed);
     }
 
-    pub fn split_queues_cache(&self) -> 
-        &lockfree::map::Map<BlockIdExt, Option<(OutMsgQueue, OutMsgQueue, HashSet<UInt256>)>> 
-    {
+    pub fn split_queues_cache(&self) -> &lockfree::map::Map<BlockIdExt, SplitQueues> {
         &self.split_queues_cache
     }
 
@@ -1346,37 +1345,34 @@ impl Engine {
                     self.apply_block(&handle, &queue_update, mc_seq_no, pre_apply).await?;
                     return Ok(())
                 }
-            } else {
+            } else if let Some((block, proof)) = self.download_block_awaiters().do_or_wait(
+                id,
+                None,
+                self.download_block_worker(id, attempts, timeout)
+            ).await? {
+                let downloading_time = now.elapsed().as_millis();
 
-                if let Some((block, proof)) = self.download_block_awaiters().do_or_wait(
-                    id,
-                    None,
-                    self.download_block_worker(id, attempts, timeout)
-                ).await? {
-                    let downloading_time = now.elapsed().as_millis();
-
-                    let now = std::time::Instant::now();
-                    proof.check_proof(self.deref()).await?;
-                    let handle = self.store_block(&block).await?;
-                    let handle = if let Some(handle) = handle.to_non_created() {
-                        handle
-                    } else {
-                        continue
-                    };
-                    let handle = self.store_block_proof(0, id, Some(handle), &proof).await?;
-                    let handle = handle.to_non_created().ok_or_else(
-                        || error!("INTERNAL ERROR: bad result for store block {} proof", id)
-                        )?;
-                    log::trace!(
-                        "Downloaded block for {}apply {} TIME download: {}ms, check & save: {}", 
-                        if pre_apply { "pre-" } else { "" }, 
-                        block.id(),
-                        downloading_time, 
-                        now.elapsed().as_millis(),
-                    );
-                    self.apply_block(&handle, &block, mc_seq_no, pre_apply).await?;
-                    return Ok(())
-                }
+                let now = std::time::Instant::now();
+                proof.check_proof(self.deref()).await?;
+                let handle = self.store_block(&block).await?;
+                let handle = if let Some(handle) = handle.to_non_created() {
+                    handle
+                } else {
+                    continue
+                };
+                let handle = self.store_block_proof(0, id, Some(handle), &proof).await?;
+                let handle = handle.to_non_created().ok_or_else(
+                    || error!("INTERNAL ERROR: bad result for store block {} proof", id)
+                    )?;
+                log::trace!(
+                    "Downloaded block for {}apply {} TIME download: {}ms, check & save: {}", 
+                    if pre_apply { "pre-" } else { "" }, 
+                    block.id(),
+                    downloading_time, 
+                    now.elapsed().as_millis(),
+                );
+                self.apply_block(&handle, &block, mc_seq_no, pre_apply).await?;
+                return Ok(())
             }
         }
     }
@@ -1814,7 +1810,7 @@ impl Engine {
 
     #[cfg(feature = "slashing")]
     async fn process_validated_block_stats_for_mc(&self, block_id: &BlockIdExt, signing_nodes: HashSet<UInt256>) -> Result<()> {
-        let block_handle = self.load_block_handle(&block_id)?.ok_or_else(|| error!("Cannot load handle for block {}", block_id))?;
+        let block_handle = self.load_block_handle(block_id)?.ok_or_else(|| error!("Cannot load handle for block {}", block_id))?;
         let mut is_link = false;
         if block_handle.has_proof_or_link(&mut is_link) {
             let (virt_block, _) = self.load_block_proof(&block_handle, is_link).await?.virtualize_block()?;
@@ -1845,7 +1841,7 @@ impl Engine {
         let validators = calc_subset_for_workchain_standard(
             &cur_validator_set,
             last_mc_state.config_params()?,
-            &shard,
+            shard,
             cc_seqno
         )?;
 
@@ -2118,6 +2114,7 @@ impl Engine {
         Ok(id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn create_download_context<'a, T>(
         &'a self,
         downloader: Arc<dyn Downloader<Item = T>>,
@@ -2400,7 +2397,7 @@ impl Engine {
             }
             if handle.is_key_block()? {
                 let mc_state = engine.load_state(handle.id()).await?;
-                if let Err(e) = Self::check_gc_for_archives(&engine, &handle, &mc_state).await {
+                if let Err(e) = Self::check_gc_for_archives(engine, &handle, &mc_state).await {
                     log::error!("Archives GC: {}", e);
                 }
             }
@@ -2480,20 +2477,18 @@ impl Engine {
                         
                         let pss_block = engine.load_pss_keeper_mc_block_id()?
                             .ok_or_else(|| error!("Cannot load pss keeper mc block id"))?;
-                        if keyblock.id().seq_no() < pss_block.seq_no() {
-                            if visited_pss_blocks >= 4 {
-                                let gen_time = keyblock.gen_utime()? as u64;
-                                let gc_max_date = gc_max_date.as_secs();
-                                if gen_time < gc_max_date {
-                                    log::info!(
-                                        "gc for archives: found block (gen time: {}, seq_no: {}), gc max date: {}",
-                                        &gen_time, keyblock.id().seq_no(), &gc_max_date
-                                    );
-                                    log::info!("start gc for archives..");
-                                    engine.db.archive_gc(keyblock.id()).await?;
-                                    log::info!("finish gc for archives.");
-                                    return Ok(());
-                                }
+                        if keyblock.id().seq_no() < pss_block.seq_no() && visited_pss_blocks >= 4 {
+                            let gen_time = keyblock.gen_utime()? as u64;
+                            let gc_max_date = gc_max_date.as_secs();
+                            if gen_time < gc_max_date {
+                                log::info!(
+                                    "gc for archives: found block (gen time: {}, seq_no: {}), gc max date: {}",
+                                    &gen_time, keyblock.id().seq_no(), &gc_max_date
+                                );
+                                log::info!("start gc for archives..");
+                                engine.db.archive_gc(keyblock.id()).await?;
+                                log::info!("finish gc for archives.");
+                                return Ok(());
                             }
                         }
                     }
@@ -2624,7 +2619,7 @@ pub(crate) async fn load_zero_state(engine: &Arc<Engine>, path: &str) -> Result<
     engine.process_initial_state(&mc_zero_state).await?;
 
     log::trace!("All static zero states had been load");
-    return Ok(true)
+    Ok(true)
 
 }
 
@@ -2647,7 +2642,7 @@ async fn boot(
     engine.set_sync_status(Engine::SYNC_STATUS_START_BOOT);
 
     if let Some(zerostate_path) = zerostate_path {
-        load_zero_state(&engine, zerostate_path).await?;
+        load_zero_state(engine, zerostate_path).await?;
     }
 
     let result = match engine.load_last_applied_mc_block_id() {
@@ -2881,7 +2876,7 @@ pub async fn run(
             ).await?;
         }
 
-        let _ = Engine::start_archives_gc(engine.clone(), boot_info.archives_gc_block)?;
+        Engine::start_archives_gc(engine.clone(), boot_info.archives_gc_block)?;
 
         #[cfg(feature = "external_db")]
         let _ = start_external_db_worker(engine.clone(), boot_info.external_db_block)?;

@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.60.5
+
+- Fixed clippy warnings
+
 ## Version 0.60.4
 
 - Fixed warnings after audit

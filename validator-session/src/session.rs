@@ -363,7 +363,7 @@ impl CatchainOverlayManager for LoopbackOverlayManager {
         &self,
         _local_id: &PublicKeyHash,
         overlay_short_id: &Arc<PrivateOverlayShortId>,
-        _nodes: &Vec<CatchainNode>,
+        _nodes: &[CatchainNode],
         overlay_listener: CatchainOverlayListenerPtr,
         _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
     ) -> Result<CatchainOverlayPtr> {
@@ -1098,7 +1098,7 @@ impl SessionImpl {
             crossbeam::channel::Receiver<Box<TaskDesc<TaskPtr>>>,
         );
 
-        let (queue_sender, queue_receiver): ChannelPair = crossbeam::crossbeam_channel::unbounded();
+        let (queue_sender, queue_receiver): ChannelPair = crossbeam::channel::unbounded();
         let task_queue: TaskQueuePtr = Arc::new(TaskQueueImpl::<TaskPtr>::new(
             name,
             queue_sender,
@@ -1118,7 +1118,7 @@ impl SessionImpl {
             crossbeam::channel::Receiver<Box<TaskDesc<CallbackTaskPtr>>>,
         );
 
-        let (queue_sender, queue_receiver): ChannelPair = crossbeam::crossbeam_channel::unbounded();
+        let (queue_sender, queue_receiver): ChannelPair = crossbeam::channel::unbounded();
         let task_queue: CallbackTaskQueuePtr = Arc::new(TaskQueueImpl::<CallbackTaskPtr>::new(
             "callbacks".to_string(),
             queue_sender,
@@ -1227,7 +1227,7 @@ impl SessionImpl {
         let catchain = catchain::CatchainFactory::create_catchain(
             &catchain_options,
             &session_id.clone(),
-            &catchain_nodes,
+            catchain_nodes,
             &local_key,
             path.to_string(),
             db_suffix,

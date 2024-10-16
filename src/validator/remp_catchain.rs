@@ -11,9 +11,10 @@
 * limitations under the License.
 */
 
-use std::{collections::{HashMap, HashSet}, fmt, sync::Arc, time::{Duration, SystemTime, UNIX_EPOCH}};
-use std::fmt::{Display, Formatter};
+use std::{collections::{HashMap, HashSet}, sync::{Arc, OnceLock}};
+use std::fmt::{Display, Formatter, Write};
 use std::ops::RangeInclusive;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
     engine_traits::EngineOperations,
@@ -37,8 +38,7 @@ use catchain::{
 use ton_api::{
     IntoBoxed, ton::ton_node::{RempCatchainRecordV2, RempMessageQuery}
 };
-use ever_block::ValidatorDescr;
-use ever_block::{error, fail, KeyId, Result, UInt256};
+use ever_block::{error, fail, KeyId, Result, UInt256, ValidatorDescr};
 
 const REMP_CATCHAIN_START_POLLING_INTERVAL: Duration = Duration::from_millis(50);
 pub const REMP_CATCHAIN_RECORDS_PER_BLOCK: usize = 4;
@@ -100,32 +100,33 @@ impl RempCatchainInstanceImpl {
 pub struct RempCatchainInstance {
     id: SystemTime,
     info: Arc<RempCatchainInfo>,
-    instance_impl: arc_swap::ArcSwapOption<RempCatchainInstanceImpl>
+    instance_impl: OnceLock<Arc<RempCatchainInstanceImpl>>,
 }
 
 impl RempCatchainInstance {
     pub fn new(info: Arc<RempCatchainInfo>) -> Self {
-        Self { id: SystemTime::now(), info, instance_impl: arc_swap::ArcSwapOption::new(None) }
+        Self { id: SystemTime::now(), info, instance_impl: OnceLock::new() }
     }
 
     pub fn init_instance(&self, instance: Arc<RempCatchainInstanceImpl>) {
         log::trace!(target: "remp", "Initializing RMQ instance {}", self);
-        match self.instance_impl.swap(Some(instance)) {
-            None => { log::trace!(target: "remp", "RMQ {} instance initialized", self); },
-            Some(_) => { log::error!("RMQ {} store_instance: already initialized", self); }
+        match self.instance_impl.set(instance) {
+            Ok(()) => { log::trace!(target: "remp", "RMQ {} instance initialized", self); },
+            Err(_) => { log::error!("RMQ {} store_instance: already initialized", self); }
         }
     }
 
     fn get_instance_impl(&self) -> Result<Arc<RempCatchainInstanceImpl>> {
-        self.instance_impl.load().ok_or_else(|| error!("RMQ {} REMP Catchain instance is absent: not started?", self))
+        self.instance_impl.get().cloned()
+            .ok_or_else(|| error!("RMQ {} REMP Catchain instance is absent: not started?", self))
     }
 
     pub fn is_session_active(&self) -> bool {
-        self.instance_impl.load().is_some()
+        self.instance_impl.get().is_some()
     }
 
     pub fn get_session(&self) -> Option<CatchainPtr> {
-        self.instance_impl.load().map(|inst| inst.catchain_ptr.clone())
+        self.instance_impl.get().map(|inst| inst.catchain_ptr.clone())
     }
 
     pub fn get_adnl_id(&self, node_idx: usize) -> Option<Arc<KeyId>> {
@@ -305,8 +306,8 @@ impl RempCatchainInstance {
     }
 }
 
-impl fmt::Display for RempCatchainInstance {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for RempCatchainInstance {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}@{}", self.info, self.get_id())
     }
 }
@@ -322,7 +323,7 @@ pub struct RempCatchainInfo {
 }
 
 impl RempCatchainInfo {
-    pub fn compute_id(current: &Vec<ValidatorDescr>, next: &Vec<ValidatorDescr>, general_session_info: Arc<GeneralSessionInfo>) -> UInt256 {
+    pub fn compute_id(current: &[ValidatorDescr], next: &[ValidatorDescr], general_session_info: Arc<GeneralSessionInfo>) -> UInt256 {
         let mut members = Vec::new();
         get_group_members_by_validator_descrs(current, &mut members);
         get_group_members_by_validator_descrs(next, &mut members);
@@ -334,13 +335,13 @@ impl RempCatchainInfo {
             last_key_block_seqno: general_session_info.key_seqno as i32,
             catchain_seqno: general_session_info.catchain_seqno as i32,
             config_hash: general_session_info.opts_hash.clone(),
-            members: members.into()
+            members
         }.into_boxed());
 
         UInt256::calc_file_hash(&serialized)
     }
 
-    fn append_validator_list(nodes: &mut Vec<CatchainNode>, nodes_vdescr: &mut Vec<ValidatorDescr>, adnl_hash: &mut HashSet<Arc<KeyId>>, c: &Vec<ValidatorDescr>) {
+    fn append_validator_list(nodes: &mut Vec<CatchainNode>, nodes_vdescr: &mut Vec<ValidatorDescr>, adnl_hash: &mut HashSet<Arc<KeyId>>, c: &[ValidatorDescr]) {
         for next_nn in c.iter() {
             let next_cn = validatordescr_to_catchain_node(next_nn);
             if !adnl_hash.contains(&next_cn.adnl_id) {
@@ -351,7 +352,7 @@ impl RempCatchainInfo {
         }
     }
 
-    fn check_unique(nodes: &Vec<CatchainNode>) -> Result<()> {
+    fn check_unique(nodes: &[CatchainNode]) -> Result<()> {
         let mut adnl_hash = HashSet::new();
         for next_cn in nodes.iter() {
             if adnl_hash.contains(&next_cn.adnl_id) { fail!("Duplicate adnl id {}", next_cn.adnl_id); }
@@ -364,13 +365,13 @@ impl RempCatchainInfo {
     pub fn create(
         general_session_info: Arc<GeneralSessionInfo>,
         master_cc_range: &RangeInclusive<u32>,
-        curr: &Vec<ValidatorDescr>,
-        next: &Vec<ValidatorDescr>,
+        curr: &[ValidatorDescr],
+        next: &[ValidatorDescr],
         local: &PublicKey,
         node_list_id: ValidatorListHash
     ) -> Result<Self> {
         let mut nodes: Vec<CatchainNode> = Vec::new();
-        let mut nodes_vdescr = curr.clone();
+        let mut nodes_vdescr = curr.to_vec();
         let mut adnl_hash: HashSet<Arc<KeyId>> = HashSet::new();
 
         Self::append_validator_list(&mut nodes, &mut nodes_vdescr, &mut adnl_hash, curr);
@@ -406,15 +407,15 @@ impl RempCatchainInfo {
             self.nodes.len() == other.nodes.len() &&
             self.nodes.iter().zip (other.nodes.iter()).all(|(a,b)| a.adnl_id == b.adnl_id);
 
-        let general_eq = self.queue_id == other.queue_id &&
+        
+
+        self.queue_id == other.queue_id &&
             self.general_session_info == other.general_session_info &&
             self.local_idx == other.local_idx &&
             self.local_key_id == other.local_key_id &&
             is_same_nodelist &&
             self.node_list_id == other.node_list_id &&
-            self.master_cc_range == other.master_cc_range;
-
-        general_eq
+            self.master_cc_range == other.master_cc_range
     }
 
     pub fn get_adnl_id(&self, index: usize) -> Option<Arc<KeyId>> {
@@ -422,8 +423,8 @@ impl RempCatchainInfo {
     }
 }
 
-impl fmt::Display for RempCatchainInfo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for RempCatchainInfo {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}*{:x}*{}", self.local_idx, self.queue_id, self.general_session_info.shard)
     }
 }
@@ -443,11 +444,15 @@ impl RempCatchain {
         remp_manager: Arc<RempManager>,
         info: Arc<RempCatchainInfo>
     ) -> Result<Self> {
-        let node_list_string: String = info.nodes.iter().map(
-            |x| format!("{:x}/{:x} ",
-                        UInt256::from(x.adnl_id.data()),
-                        UInt256::from(x.public_key.id().data()))
-        ).collect();
+        let node_list_string = info.nodes.iter().fold(
+            String::new(),
+            |mut res, x| {
+                let _ = write!(res, "{}/{} ",
+                        hex::encode(x.adnl_id.data()),
+                        hex::encode(x.public_key.id().data()));
+                res
+            }
+        );
 
         log::trace!(target: "remp", "New message queue: id {:x}, nodes: {}, local_idx: {}, master_cc: {}..={}",
             info.queue_id,
@@ -456,12 +461,12 @@ impl RempCatchain {
             info.master_cc_range.start(), info.master_cc_range.end()
         );
 
-        return Ok(Self {
+        Ok(Self {
             engine,
             info: info.clone(),
             instance: RempCatchainInstance::new(info.clone()),
             remp_manager
-        });
+        })
     }
 
     pub async fn start(self: Arc<RempCatchain>, local_key: PrivateKey) -> Result<CatchainPtr> {
@@ -486,7 +491,7 @@ impl RempCatchain {
         let catchain_ptr = CatchainFactory::create_catchain(
             &rmq_catchain_options,
             &self.info.queue_id,
-            &self.info.nodes,
+            self.info.nodes.to_vec(),
             &local_key,
             db_root,
             db_suffix,
@@ -568,7 +573,7 @@ impl RempCatchain {
         Ok(rmqrecord.message_id.clone())
     }
 
-    pub fn pack_payload(messages_to_pack: &Vec<RempCatchainRecordV2>) -> (BlockPayloadPtr, Vec<String>) {
+    pub fn pack_payload(messages_to_pack: &[RempCatchainRecordV2]) -> (BlockPayloadPtr, Vec<String>) {
         let mut msg_vect: Vec<::ton_api::ton::validator_session::round::Message> = Vec::new();
         let mut msg_ids: Vec<String> = Vec::new();
 
@@ -585,7 +590,7 @@ impl RempCatchain {
 
         let payload = ::ton_api::ton::validator_session::blockupdate::BlockUpdate {
             ts: 0, //ts as i64,
-            actions: msg_vect.into(),
+            actions: msg_vect,
             state: 0 //real_state_hash as i32,
         }.into_boxed();
 
@@ -609,8 +614,8 @@ impl RempCatchain {
     }
 }
 
-impl fmt::Display for RempCatchain {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for RempCatchain {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.info)
     }
 }
@@ -704,7 +709,7 @@ enum RempCatchainStatus {
 }
 
 impl Display for RempCatchainStatus {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             RempCatchainStatus::Created => "created",
             RempCatchainStatus::Starting => "starting",
@@ -740,14 +745,20 @@ impl RempCatchainWrapper {
     }
 }
 
-impl fmt::Display for RempCatchainWrapper {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for RempCatchainWrapper {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}({:?})", self.info, self.status)
     }
 }
 
 pub struct RempCatchainStore {
     catchains: MutexWrapper<HashMap<UInt256, RempCatchainWrapper>>,
+}
+
+impl Default for RempCatchainStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RempCatchainStore {
@@ -757,7 +768,7 @@ impl RempCatchainStore {
 
     pub async fn activate_catchain(&self, session_id: &UInt256) -> Result<()> {
         self.catchains.execute_sync(|x| {
-            match x.get_mut(&session_id) {
+            match x.get_mut(session_id) {
                 Some(cc) => cc.set_active(),
                 None => fail!("REMP Catchain session {:x} start impossible -- session disappeared", session_id)
             }
@@ -775,7 +786,7 @@ impl RempCatchainStore {
 
         let (catchain_info, do_start) = loop {
             let (cc_status, catchain_info) = self.catchains.execute_sync(|x| {
-                match x.get_mut(&session_id) {
+                match x.get_mut(session_id) {
                     Some(existing @ RempCatchainWrapper{status: RempCatchainStatus::Created, ..}) =>
                         fail!("REMP Catchain Store: impossible status {:?} for session id {:x}", existing.status, session_id),
                     Some(existing @ RempCatchainWrapper{status: RempCatchainStatus::Starting, ..}) =>
@@ -881,23 +892,26 @@ impl RempCatchainStore {
             );
             res.push((displayed, info.queue_id.clone()))
         }
-        return res;
+        res
     }
 
     pub async fn gc_catchain_sessions(self: Arc<Self>, rt: tokio::runtime::Handle, alive_sessions: HashSet<UInt256>) {
-        let sessions_to_gc = self.catchains.execute_sync(|x| {
-            let mut sessions_to_gc = Vec::new();
+        let mut sessions_to_gc = Vec::new();
+        self.catchains.execute_sync(|x| {
             for (id,remp_cc) in x.iter_mut() {
                 if !alive_sessions.contains(id) && remp_cc.status < RempCatchainStatus::ToStop {
                     remp_cc.status = RempCatchainStatus::ToStop;
                     sessions_to_gc.push(id.clone());
                 }
             }
-            sessions_to_gc
         }).await;
 
         rt.spawn( async move {
-            log::trace!(target: "remp", "GC catchain sessions: {}", sessions_to_gc.iter().map(|x| format!("{:x} ", x)).collect::<String>());
+            log::trace!(target: "remp", "GC catchain sessions: {}",
+                sessions_to_gc.iter().fold(String::new(), |mut res, x| {
+                    let _ = write!(res, "{:x} ", x);
+                    res
+                }));
             for s in sessions_to_gc {
                 if let Err(e) = self.stop_catchain(&s).await {
                     log::error!(target: "remp", "Cannot GC catchain session {}, error while stopping: `{}`", s, e);

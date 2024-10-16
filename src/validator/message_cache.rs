@@ -14,7 +14,7 @@
 use std::{
     cmp::max, 
     collections::HashSet,
-    fmt, fmt::{Display, Formatter},
+    fmt, fmt::{Display, Formatter, Write},
     ops::RangeInclusive,
     sync::{Arc, atomic::{AtomicU32, Ordering, Ordering::Relaxed}},
     time::{Duration, SystemTime}
@@ -76,7 +76,7 @@ impl RmqMessage {
 
     fn new_with_id(message: Arc<Message>, message_id: UInt256) -> Result<Self> {
         let message_uid = get_message_uid(&message);
-        return Ok(RmqMessage { message, message_id, message_uid })
+        Ok(RmqMessage { message, message_id, message_uid })
     }
 
     pub fn from_raw_message(raw_msg: &ton_api::ton::bytes) -> Result<Self> {
@@ -86,7 +86,7 @@ impl RmqMessage {
 
     pub fn as_remp_message_body(&self) -> ton_api::ton::ton_node::RempMessageBody {
         ton_api::ton::ton_node::rempmessagebody::RempMessageBody {
-            message: self.message.write_to_bytes().unwrap().into()
+            message: self.message.write_to_bytes().unwrap()
         }.into_boxed()
     }
 
@@ -95,7 +95,7 @@ impl RmqMessage {
     }
 
     pub fn deserialize_message_body(raw: &ton_api::ton::bytes) -> Result<ton_api::ton::ton_node::RempMessageBody> {
-        let message_body: ton_api::ton::ton_node::RempMessageBody = catchain::utils::deserialize_tl_boxed_object(&raw)?;
+        let message_body: ton_api::ton::ton_node::RempMessageBody = catchain::utils::deserialize_tl_boxed_object(raw)?;
         Ok(message_body)
     }
 
@@ -175,7 +175,7 @@ impl RempMessageHeader {
     }
 */
     pub fn deserialize(raw: &ton_api::ton::bytes) -> Result<ton_api::ton::ton_node::RempCatchainRecordV2> {
-        let rmq_record: ton_api::ton::ton_node::RempCatchainRecordV2 = catchain::utils::deserialize_tl_boxed_object(&raw)?;
+        let rmq_record: ton_api::ton::ton_node::RempCatchainRecordV2 = catchain::utils::deserialize_tl_boxed_object(raw)?;
         Ok(rmq_record)
     }
 /*
@@ -191,7 +191,7 @@ impl RempMessageHeader {
 */
     pub fn serialize(rmq_record: &ton_api::ton::ton_node::RempCatchainRecordV2) -> Result<ton_api::ton::bytes> {
         let rmq_record_serialized = serialize_tl_boxed_object!(rmq_record);
-        return Ok(rmq_record_serialized)
+        Ok(rmq_record_serialized)
     }
 
     pub fn from_remp_catchain(record: &RempCatchainMessageHeaderV2) -> Result<Self> {
@@ -200,7 +200,7 @@ impl RempMessageHeader {
 
     pub fn serialize_query(query: &ton_api::ton::ton_node::RempMessageQuery) -> Result<ton_api::ton::bytes> {
         let query_serialized = serialize_tl_boxed_object!(query);
-        return Ok(query_serialized)
+        Ok(query_serialized)
     }
 
     pub fn deserialize_query(raw: &ton_api::ton::bytes) -> Result<ton_api::ton::ton_node::RempMessageQuery> {
@@ -209,7 +209,7 @@ impl RempMessageHeader {
     }
 
     pub fn as_remp_message_query(&self) -> ton_api::ton::ton_node::RempMessageQuery {
-        let message_id = self.message_id.clone().into();
+        let message_id = self.message_id.clone();
         ton_api::ton::ton_node::rempmessagequery::RempMessageQuery { message_id }.into_boxed()
     }
 }
@@ -248,8 +248,8 @@ impl RempMessageOrigin {
 
     pub fn as_remp_catchain_record(&self, message_id: &UInt256, message_uid: &UInt256, master_cc: u32) -> ton_api::ton::ton_node::RempCatchainRecordV2 {
         ton_api::ton::ton_node::rempcatchainrecordv2::RempCatchainMessageHeaderV2 {
-            message_id: message_id.clone().into(),
-            message_uid: message_uid.clone().into(),
+            message_id: message_id.clone(),
+            message_uid: message_uid.clone(),
             source_key_id: UInt256::from(self.source_key.data()),
             source_idx: self.source_idx as i32,
             masterchain_seqno: master_cc as i32
@@ -258,7 +258,7 @@ impl RempMessageOrigin {
 
     pub fn from_remp_catchain(record: &RempCatchainMessageHeaderV2) -> Result<Self> {
         Self::new(
-            KeyId::from_data(record.source_key_id.as_slice().clone()),
+            KeyId::from_data(*record.source_key_id.as_slice()),
             record.source_idx as u32
         )
     }
@@ -307,19 +307,19 @@ pub struct RempMessageWithOrigin {
 
 impl RempMessageWithOrigin {
     pub fn get_message_id(&self) -> &UInt256 {
-        return &self.message.message_id;
+        &self.message.message_id
     }
 
     pub fn has_no_source_key(&self) -> bool {
-        return self.origin.has_no_source_key();
+        self.origin.has_no_source_key()
     }
 
     pub fn as_remp_catchain_record(&self, master_cc: u32) -> ton_api::ton::ton_node::RempCatchainRecordV2 {
-        return self.origin.as_remp_catchain_record(&self.message.message_id, &self.message.message_uid, master_cc)
+        self.origin.as_remp_catchain_record(&self.message.message_id, &self.message.message_uid, master_cc)
     }
 
     pub fn as_remp_message_body(&self) -> ton_api::ton::ton_node::RempMessageBody {
-        return self.message.as_remp_message_body()
+        self.message.as_remp_message_body()
     }
 }
 
@@ -414,19 +414,17 @@ impl MessageCacheSession {
                     fail!("Different message body: new body '{}', current cached body '{}'", m1, m2.value());
                 }
             }
+            else if let Some(m2) = self.messages.insert(message_id.clone(), m1.clone()) {
+                if m1 != &m2 {
+                    fail!("Parallel updating of message body: new body '{}', another body '{}'", m1, m2)
+                }
+                log::warn!(target: "remp",
+                    "Update_missing_fields: body for message {:x} inserted as new, although it is present already in cache, considering non-updated",
+                    message_id
+                )
+            }
             else {
-                if let Some(m2) = self.messages.insert(message_id.clone(), m1.clone()) {
-                    if m1 != &m2 {
-                        fail!("Parallel updating of message body: new body '{}', another body '{}'", m1, m2)
-                    }
-                    log::warn!(target: "remp",
-                        "Update_missing_fields: body for message {:x} inserted as new, although it is present already in cache, considering non-updated",
-                        message_id
-                    )
-                }
-                else {
-                    body_updated = true
-                }
+                body_updated = true
             }
         };
 
@@ -437,11 +435,9 @@ impl MessageCacheSession {
                     log::trace!("Different message origin: new origin '{}', current cached origin '{}'", o1, o2.value());
                 }
             }
-            else {
-                if let Some(o2) = self.message_origins.insert(message_id.clone(), o1.clone()) {
-                    if o1 != &o2 {
-                        log::trace!("Different message origin: new origin '{}', current cached origin '{}'", o1, o2);
-                    }
+            else if let Some(o2) = self.message_origins.insert(message_id.clone(), o1.clone()) {
+                if o1 != &o2 {
+                    log::trace!("Different message origin: new origin '{}', current cached origin '{}'", o1, o2);
                 }
             }
         }
@@ -459,26 +455,24 @@ impl MessageCacheSession {
             self.messages.contains_key(msg_id)
         {
             if self.get_message_status(msg_id)?.is_some() {
-                return Ok(true);
+                Ok(true)
             }
             else {
                 fail!("Inconsistent message info in cache: {}", self.message_info(msg_id))
             }
         }
         else {
-            return Ok(false);
+            Ok(false)
         }
     }
 
     fn starts_before_block(&self, blk: &BlockIdExt) -> bool {
         for inf in &self.inf_shards {
-            if inf.shard().intersect_with(blk.shard()) {
-                if inf.seq_no() >= blk.seq_no() {
-                    return false
-                }
+            if inf.shard().intersect_with(blk.shard()) && inf.seq_no() >= blk.seq_no() {
+                return false
             }
         }
-        return true
+        true
     }
 
     fn all_messages_count(&self) -> (usize,usize,usize) {
@@ -521,7 +515,7 @@ impl MessageCacheSession {
             let old_status = self.message_status.insert(message_id.clone(), new_status.clone());
             log::trace!(target: "remp", "Changing message status for {:x}: {:?} => {}", message_id, old_status, new_status);
 
-            if let Some(actual_status) = self.get_message_status(&message_id)? {
+            if let Some(actual_status) = self.get_message_status(message_id)? {
                 if is_finally_accepted(&actual_status) {
                     log::error!(target: "remp", "Changing status for {:x} to {}, although it has final status {}", message_id, new_status, actual_status);
                 }
@@ -570,10 +564,12 @@ impl MessageCacheSession {
     fn message_events_to_string(&self, message_id: &UInt256) -> String {
         let events = self.message_events.get_set(message_id);
         let result = if let Some(msg) = self.message_origins.get(message_id) {
-            let base = msg.value().timestamp;
-            events.iter().map(|x| format!("{} ", (*x) as i64 - base as i64)).collect()
-        }
-        else {
+            let base = msg.value().timestamp as i64;
+            events.iter().fold(String::new(), |mut res, x| {
+                let _ = write!(res, "{} ", *x as i64 - base);
+                res
+            })
+        } else {
             "*events: no message origin*".to_string()
         };
         format!("{} ({} events)", result, events.len())
@@ -652,7 +648,7 @@ impl MessageCacheSession {
                 (m, h) => {
                     log::error!(target: "remp",
                         "Record for message {:?} is in incorrect state: msg = {:?}, status = {:?}",
-                        id, m.map(|x| x.value().clone()), h.map(|x| x.clone())
+                        id, m.map(|x| x.value().clone()), h
                     );
                     stats.incorrect += 1
                 }
@@ -672,7 +668,7 @@ impl MessageCacheSession {
             messages: DashMap::default(),
             message_status: DashMap::default(),
             message_finally_accepted: DashMap::default(),
-            inf_shards: HashSet::from_iter(inf_shards.into_iter()),
+            inf_shards: HashSet::from_iter(inf_shards),
             blocks_processed: DashSet::default(),
         }
     }
@@ -863,8 +859,12 @@ impl MessageCache {
     /// If we do not know anything -- TODO: if all reject, then 'Rejected'. Otherwise 'New'
     /// Actual -- get it as granted ("imprinting")
     /// Returns old status, new (added) status, and body_updated flag
+    #[allow(clippy::too_many_arguments)]
     pub fn add_external_message_status<F>(&self,
-        message_id: &UInt256, message_uid: &UInt256, message: Option<Arc<RmqMessage>>, message_origin: Option<Arc<RempMessageOrigin>>,
+        message_id: &UInt256,
+        message_uid: &UInt256,
+        message: Option<Arc<RmqMessage>>,
+        message_origin: Option<Arc<RempMessageOrigin>>,
         status_if_new: RempMessageStatus, status_updater: F,
         master_cc: u32
     ) -> Result<(Option<RempMessageStatus>,RempMessageStatus,bool)>
@@ -895,14 +895,14 @@ impl MessageCache {
             },
             Some(session) => {
                 let body_updated = session
-                    .update_missing_fields(&message_id, message, message_origin)
+                    .update_missing_fields(message_id, message, message_origin)
                     .unwrap_or_else(|e| {
                         log::error!(target: "remp", "Different cache contents for external message {}: {}", message_id, e);
                         false
                     });
 
                 let (old_status, final_status) =
-                    session.alter_message_status(&message_id, |old| status_updater(old,&status_if_new))?;
+                    session.alter_message_status(message_id, |old| status_updater(old,&status_if_new))?;
 
                 Ok((Some(old_status), final_status, body_updated))
             },
@@ -924,7 +924,7 @@ impl MessageCache {
         let info = self.get_message_info(&data.message_id)?;
         log::trace!(target: "remp", "Message {}, tried to update message body: old status {}, new status {}, full message cache info {}",
             &data,
-            match old_status { Some(m) => format!("{}",m), None => format!("None") },
+            old_status.map_or_else(|| "None".to_string(), |m| m.to_string()),
             new_status,
             info
         );
@@ -1019,8 +1019,8 @@ impl MessageCache {
                 Some(_) => Ok((get_level_numeric_value(&RempMessageLevel::TonNode_RempQueue), RempDuplicateStatus::Fresh(uid.clone()))),
                 None => Ok((get_level_numeric_value(&RempMessageLevel::TonNode_RempQueue), RempDuplicateStatus::Absent)),
             }
-        }).fold(Ok(None), |acc: Result<Option<(i32, RempDuplicateStatus)>>, curr: Result<(i32, RempDuplicateStatus)>|
-            Ok(max(acc?, Some(curr?)))
+        }).try_fold(None, |acc: Option<(i32, RempDuplicateStatus)>, curr: Result<(i32, RempDuplicateStatus)>|
+            Result::Ok(max(acc, Some(curr?)))
         )? {
             None => fail!("Message cache: empty list of messages for uid {:x}", uid),
             Some((_lvl, RempDuplicateStatus::Absent)) => fail!("Message cache: no actual messages in list for uid {:x}", uid),
@@ -1029,7 +1029,7 @@ impl MessageCache {
         };
 
         // Check whether message_id is minimal among other messages with same uid
-        match self.get_lower_id_for_uid(&message_id, &uid)? {
+        match self.get_lower_id_for_uid(message_id, &uid)? {
             None => Ok(fresh_duplicate_status),
             Some(lowest_msg_id) => {
                 if self.get_session_for_message(&lowest_msg_id).is_none() {
@@ -1141,15 +1141,15 @@ impl MessageCache {
                     "Computing lwb for upb {}: not enough time info, leaving range lwb in place",
                     new_current_master_cc
                 );
-                return Ok(None)
+                Ok(None)
             },
             Some((new_lwb, new_lwb_time)) => {
                 log::info!(target: "remp", "Computed lwb for upb: {}..={} [{}s..={}s]",
                     new_lwb, new_current_master_cc, new_lwb_time, new_time
                 );
-                return Ok(Some(*new_lwb))
+                Ok(Some(*new_lwb))
             }
-        };
+        }
     }
 
     pub fn set_master_cc_range(&self, new_range: &RangeInclusive<u32>) -> Result<()> {
@@ -1206,7 +1206,7 @@ impl MessageCache {
     }
 
     fn extend_info_for_uids(&self, uid: &UInt256) -> String {
-        self.get_messages_for_uid(&uid).iter()
+        self.get_messages_for_uid(uid).iter()
             .map(|x| match self.get_session_for_message(x) {
                     Some(v) => format!("{:x}:master cc {}; ", x, v.master_cc),
                     None => format!("{:x}:None; ", x)

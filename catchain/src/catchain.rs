@@ -719,7 +719,7 @@ impl ReceiverListenerImpl {
 
         self.next_completion_handler_available_index += 1;
 
-        const MAX_COMPLETION_HANDLER_INDEX: CompletionHandlerId = std::u64::MAX;
+        const MAX_COMPLETION_HANDLER_INDEX: CompletionHandlerId = u64::MAX;
 
         assert!(self.next_completion_handler_available_index < MAX_COMPLETION_HANDLER_INDEX);
 
@@ -1925,7 +1925,7 @@ impl CatchainProcessor {
     */
 
     fn generate_extra_id(&mut self) -> BlockExtraId {
-        const MAX_EXTRA_ID: BlockExtraId = std::u64::MAX;
+        const MAX_EXTRA_ID: BlockExtraId = u64::MAX;
 
         assert!(self.current_extra_id < MAX_EXTRA_ID);
 
@@ -2470,7 +2470,7 @@ impl CatchainOverlayManager for DummyCatchainOverlayManager {
         &self,
         _local_id: &PublicKeyHash,
         _overlay_short_id: &Arc<PrivateOverlayShortId>,
-        _nodes: &Vec<CatchainNode>,
+        _nodes: &[CatchainNode],
         _overlay_listener: CatchainOverlayListenerPtr,
         _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
     ) -> Result<CatchainOverlayPtr> {
@@ -2635,7 +2635,7 @@ impl CatchainImpl {
     pub fn create(
         options: &Options,
         session_id: &SessionId,
-        ids: &Vec<CatchainNode>,
+        ids: Vec<CatchainNode>,
         local_key: &PrivateKey,
         path: String,
         db_suffix: String,
@@ -2648,11 +2648,11 @@ impl CatchainImpl {
         let (main_queue_sender, main_queue_receiver): (
             crossbeam::channel::Sender<Box<TaskDesc<dyn FnOnce(&mut CatchainProcessor) + Send>>>,
             crossbeam::channel::Receiver<Box<TaskDesc<dyn FnOnce(&mut CatchainProcessor) + Send>>>,
-        ) = crossbeam::crossbeam_channel::unbounded();
+        ) = crossbeam::channel::unbounded();
         let (utility_queue_sender, utility_queue_receiver): (
             crossbeam::channel::Sender<Box<TaskDesc<dyn FnOnce() + Send>>>,
             crossbeam::channel::Receiver<Box<TaskDesc<dyn FnOnce() + Send>>>,
-        ) = crossbeam::crossbeam_channel::unbounded();
+        ) = crossbeam::channel::unbounded();
         let utility_queue_sender_clone = utility_queue_sender.clone();
         let should_stop_flag = Arc::new(AtomicBool::new(false));
         let destroy_db_flag = Arc::new(AtomicBool::new(false));
@@ -2707,7 +2707,6 @@ impl CatchainImpl {
 
         let catchain = Arc::new(body);
         let catchain_ret = catchain.clone();
-        let ids = ids.clone();
         let local_key = local_key.clone();
         let session_id = session_id.clone();
         let options = *options;

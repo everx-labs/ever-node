@@ -60,7 +60,7 @@ impl Serializable for ValidatorBlockCandidateWrapper {
                 ShardIdent::default(), 0, // Shard & seqno: not needed
                 self.candidate.id.root_hash.clone(),
                 self.candidate.id.file_hash.clone()
-            ).into(),
+            ),
             data : self.candidate.data.data().clone(),
             collated_data : self.candidate.collated_data.data().clone()
         };
@@ -73,7 +73,7 @@ impl Serializable for ValidatorBlockCandidateWrapper {
             Ok(ton_api::ton::db::candidate::Candidate { source, id, data, collated_data }) => {
                 let candidate = ValidatorBlockCandidate {
                     public_key: (&source).try_into()?,
-                    id: ValidatorBlockId { root_hash: id.root_hash.into(), file_hash: id.file_hash.into() },
+                    id: ValidatorBlockId { root_hash: id.root_hash, file_hash: id.file_hash },
                     collated_file_hash: catchain::utils::get_hash(&data),
                     data: CatchainFactory::create_block_payload(data),
                     collated_data: CatchainFactory::create_block_payload(collated_data)

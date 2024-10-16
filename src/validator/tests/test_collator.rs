@@ -25,7 +25,7 @@ use ever_block::{Result, AccountIdPrefixFull};
 use pretty_assertions::assert_eq;
 use std::{fs::{create_dir_all, remove_dir_all}, sync::Arc};
 
-const RES_PATH: &'static str = "target/cmp";
+const RES_PATH: &str = "target/cmp";
 
 async fn try_collate_by_bundle(bundle: Arc<CollatorTestBundle>) -> Result<(Block, ShardStateUnsplit)> {
     try_collate_by_engine(
@@ -48,7 +48,7 @@ async fn try_collate_by_engine(
     rand_seed_opt: Option<UInt256>,
 ) -> Result<(Block, ShardStateUnsplit)> {
     std::fs::create_dir_all(RES_PATH).ok();
-    let prev_blocks_history = PrevBlockHistory::new_prevs(&shard, &prev_blocks_ids);
+    let prev_blocks_history = PrevBlockHistory::new_prevs(shard.clone(), prev_blocks_ids.clone());
     let mc_state = engine.load_last_applied_mc_state().await?;
     let mc_state_extra = mc_state.shard_state_extra()?;
     let mut cc_seqno_with_delta = 0;
@@ -98,7 +98,7 @@ async fn try_collate_by_engine(
     let validator_query = ValidateQuery::new(
         shard.clone(),
         min_mc_seq_no,
-        prev_blocks_ids.clone(),
+        prev_blocks_ids,
         block_candidate.clone(),
         validator_set.clone(),
         engine.clone(),
@@ -170,8 +170,8 @@ fn test_hypercube_routing_off() {
     let hop_shard_id = ShardIdent::with_prefix_len(pfx_len, 0, hop).unwrap();
     let src_prefix = env.src_prefix();
     let dst_prefix = env.dst_prefix();
-    assert!(src_shard_id.contains_full_prefix(&src_prefix));
-    assert!(dst_shard_id.contains_full_prefix(&dst_prefix));
+    assert!(src_shard_id.contains_full_prefix(src_prefix));
+    assert!(dst_shard_id.contains_full_prefix(dst_prefix));
 
     assert_eq!(src_prefix, &AccountIdPrefixFull::workchain(0, src));
     assert_eq!(dst_prefix, &AccountIdPrefixFull::workchain(0, dst));
@@ -181,10 +181,10 @@ fn test_hypercube_routing_off() {
 
     assert_eq!(src_prefix, cur_prefix);
     assert_eq!(dst_prefix, next_prefix);
-    assert!(src_shard_id.contains_full_prefix(&cur_prefix));
+    assert!(src_shard_id.contains_full_prefix(cur_prefix));
     println!("shard: {}, prefix: {:x}", hop_shard_id, next_prefix.prefix);
-    assert!(!hop_shard_id.contains_full_prefix(&next_prefix));
-    assert!(dst_shard_id.contains_full_prefix(&next_prefix));
+    assert!(!hop_shard_id.contains_full_prefix(next_prefix));
+    assert!(dst_shard_id.contains_full_prefix(next_prefix));
 
     assert_eq!(cur_prefix,  &AccountIdPrefixFull::workchain(0, src));
     assert_eq!(next_prefix, &AccountIdPrefixFull::workchain(0, dst));

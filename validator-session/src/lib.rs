@@ -35,7 +35,7 @@ mod vote_candidate;
 pub use cache::*;
 use catchain::CatchainPtr;
 use task_queue::{CallbackTaskQueuePtr, CompletionHandlerProcessor, TaskQueuePtr};
-use std::{any::Any, cell::RefCell, fmt, rc::Rc, sync::{Arc, Weak}};
+use std::{any::Any, cell::RefCell, fmt, rc::Rc, sync::{Arc, LazyLock, Weak}};
 
 pub mod ton {
     pub use ton_api::ton::int;
@@ -96,13 +96,10 @@ pub type PublicKeyHash = ::catchain::PublicKeyHash;
 /// Block ID
 pub type BlockId = BlockHash;
 
-lazy_static::lazy_static! {
-  /// Block candidate identifier for skip round (optional case to identify candidate as empty)
-  pub static ref SKIP_ROUND_CANDIDATE_BLOCKID : BlockId = ever_block::UInt256::default();
-
-  /// Default block ID for internal use
-  pub static ref DEFAULT_BLOCKID : BlockId = ever_block::UInt256::default();
-}
+/// Block candidate identifier for skip round (optional case to identify candidate as empty)
+pub static SKIP_ROUND_CANDIDATE_BLOCKID: LazyLock<BlockId> = LazyLock::new(Default::default);
+/// Default block ID for internal use
+pub static DEFAULT_BLOCKID: LazyLock<BlockId> = LazyLock::new(Default::default);
 
 /// Overlay manager
 pub type CatchainOverlayManagerPtr = catchain::CatchainOverlayManagerPtr;
@@ -342,6 +339,9 @@ pub trait Vector<T: Clone + HashableObject + TypeDesc + MovablePoolObject<T> + f
     /// Size of vector
     fn len(&self) -> usize;
 
+    /// IsEmpty of vector
+    fn is_empty(&self) -> bool;
+
     /// Access to an item
     fn at(&self, index: usize) -> &T;
 
@@ -368,7 +368,7 @@ pub trait Vector<T: Clone + HashableObject + TypeDesc + MovablePoolObject<T> + f
     fn modify(
         &self,
         desc: &mut dyn SessionDescription,
-        modifier: &Box<dyn Fn(&T) -> T>,
+        modifier: &dyn Fn(&T) -> T,
     ) -> PoolPtr<dyn Vector<T>>;
 
     /// Clone object to persistent pool
@@ -382,6 +382,9 @@ pub trait Vector<T: Clone + HashableObject + TypeDesc + MovablePoolObject<T> + f
 pub trait VectorWrapper<T: Clone + HashableObject + TypeDesc + MovablePoolObject<T> + fmt::Debug> {
     /// Size of vector
     fn len(&self) -> usize;
+
+    /// IsEmpty of vector
+    fn is_empty(&self) -> bool;
 
     /// Access to an item
     fn at(&self, index: usize) -> &T;
@@ -409,7 +412,7 @@ pub trait VectorWrapper<T: Clone + HashableObject + TypeDesc + MovablePoolObject
     fn modify(
         &self,
         desc: &mut dyn SessionDescription,
-        modifier: &Box<dyn Fn(&T) -> T>,
+        modifier: &dyn Fn(&T) -> T,
     ) -> Option<PoolPtr<dyn Vector<T>>>;
 }
 
@@ -417,6 +420,9 @@ pub trait VectorWrapper<T: Clone + HashableObject + TypeDesc + MovablePoolObject
 pub trait BoolVector: HashableObject + PoolObject + fmt::Display + fmt::Debug {
     /// Size of vector
     fn len(&self) -> usize;
+
+    /// IsEmpty of vector
+    fn is_empty(&self) -> bool;
 
     /// Access to an item
     fn at(&self, index: usize) -> bool;
@@ -451,6 +457,9 @@ pub trait SortedVector<
     /// Size of vector
     fn len(&self) -> usize;
 
+    /// IsEmpty of vector
+    fn is_empty(&self) -> bool;
+
     /// Access to an item
     fn at(&self, index: usize) -> &T;
 
@@ -480,6 +489,9 @@ pub trait SortedVectorWrapper<
 {
     /// Size of vector
     fn len(&self) -> usize;
+
+    /// IsEmpty of vector
+    fn is_empty(&self) -> bool;
 
     /// Access to an item
     fn at(&self, index: usize) -> &T;
@@ -1233,6 +1245,7 @@ pub trait SessionListener {
     fn on_generate_slot(&self, round: u32, callback: ValidatorBlockCandidateCallback);
 
     /// New block is committed
+    #[allow(clippy::too_many_arguments)]
     fn on_block_committed(
         &self,
         round: u32,
@@ -1477,6 +1490,7 @@ impl SessionFactory {
     }
 
     /// Create session
+    #[allow(clippy::too_many_arguments)]
     pub fn create_session(
         options: &SessionOptions,
         session_id: &SessionId,
@@ -1536,6 +1550,7 @@ impl SessionFactory {
     }
 
     /// Create session processor
+    #[allow(clippy::too_many_arguments)]
     pub fn create_session_processor(
         options: SessionOptions,
         session_id: SessionId,

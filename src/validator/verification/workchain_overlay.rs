@@ -107,11 +107,12 @@ impl WorkchainOverlay {
     */
 
     /// Create new overlay
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         workchain_id: i32,
         debug_id_prefix: String,
         overlay_id: UInt256,
-        validators: &Vec<ValidatorDescr>,
+        validators: &[ValidatorDescr],
         local_adnl_id: PublicKeyHash,
         listener: Weak<dyn WorkchainOverlayListener>,
         engine: &EnginePtr,
@@ -122,7 +123,7 @@ impl WorkchainOverlay {
         is_master_chain_overlay: bool,
     ) -> Result<Arc<Self>> {
         let overlay_short_id =
-            PrivateOverlayShortId::from_data(overlay_id.as_slice().clone());
+            PrivateOverlayShortId::from_data(*overlay_id.as_slice());
         let node_debug_id = Arc::new(format!("{}.{}", debug_id_prefix, overlay_short_id));
 
         log::debug!(target: "verificator", "Creating verification workchain's #{} private overlay - overlay_id={}, overlay={}", workchain_id, overlay_id.to_hex_string(), node_debug_id);
@@ -131,7 +132,7 @@ impl WorkchainOverlay {
         let nodes: Vec<CatchainNode> = validators
             .iter()
             .map(|desc| CatchainNode {
-                adnl_id: get_adnl_id(&desc),
+                adnl_id: get_adnl_id(desc),
                 public_key: sigpubkey_to_publickey(&desc.public_key),
             })
             .collect();
@@ -233,7 +234,7 @@ impl WorkchainOverlay {
     */
 
     /// Send message to neighbours
-    pub fn send_message_to_forwarding_neighbours(&self, data: BlockPayloadPtr, neighbours: &Vec<usize>) {
+    pub fn send_message_to_forwarding_neighbours(&self, data: BlockPayloadPtr, neighbours: &[usize]) {
         log::trace!(target: "verificator", "Sending multicast to {} forwarding neighbours (overlay={})", neighbours.len(), self.node_debug_id);
 
         self.send_message_to_neighbours_counter.increment(1);
@@ -242,7 +243,7 @@ impl WorkchainOverlay {
     }
 
     /// Send message to custom neighbours
-    pub fn send_message_to_far_neighbours(&self, data: BlockPayloadPtr, neighbours: &Vec<usize>) {
+    pub fn send_message_to_far_neighbours(&self, data: BlockPayloadPtr, neighbours: &[usize]) {
         log::trace!(target: "verificator", "Sending multicast to {} far neighbours (overlay={})", neighbours.len(), self.node_debug_id);
 
         self.send_message_to_far_neighbours_counter.increment(1);
@@ -251,21 +252,15 @@ impl WorkchainOverlay {
     }
 
     /// Send message to validators
-    pub fn send_message_to_validators(&self, data: BlockPayloadPtr, validators: &Vec<usize>) {
+    pub fn send_message_to_validators(&self, data: BlockPayloadPtr, validators: &[usize]) {
         let mut adnl_ids = Vec::with_capacity(validators.len());
 
         for idx in validators {
-            if *idx >= self.validators_adnl_ids.len() {
-                continue;
+            if let Some(adnl_id) = self.validators_adnl_ids.get(*idx) {
+                if adnl_id != &self.local_adnl_id {
+                    adnl_ids.push(adnl_id.clone());
+                }
             }
-
-            let adnl_id = self.validators_adnl_ids[*idx].clone();
-
-            if adnl_id == self.local_adnl_id {
-                continue;
-            }
-
-            adnl_ids.push(adnl_id.clone());
         }
 
         self.send_message_multicast(&adnl_ids, data);

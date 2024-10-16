@@ -235,7 +235,7 @@ impl CatchainOverlayManager for LogPlayerOverlayManager {
         &self,
         local_id: &PublicKeyHash,
         overlay_short_id: &Arc<PrivateOverlayShortId>,
-        nodes: &Vec<CatchainNode>,
+        nodes: &[CatchainNode],
         listener: CatchainOverlayListenerPtr,
         overlay_log_replay_listener: CatchainOverlayLogReplayListenerPtr,
     ) -> Result<CatchainOverlayPtr> {
@@ -303,14 +303,14 @@ impl CatchainOverlayManager for LogPlayerOverlayManager {
 impl LogPlayerOverlayManager {
     fn create(
         session_id: &SessionId,
-        node_ids: &Vec<CatchainNode>,
+        node_ids: &[CatchainNode],
         log_replay_options: &LogReplayOptions,
         initial_timestamp: &SystemTime,
         replay_listener: CatchainReplayListenerPtr,
     ) -> Self {
         Self {
             session_id: session_id.clone(),
-            node_ids: node_ids.clone(),
+            node_ids: node_ids.to_vec(),
             log_replay_options: log_replay_options.clone(),
             initial_timestamp: initial_timestamp.clone(),
             replay_listener: replay_listener,
@@ -345,7 +345,7 @@ impl LogPlayer for LogPlayerImpl {
         &self.local_key
     }
 
-    fn get_nodes(&self) -> &Vec<CatchainNode> {
+    fn get_nodes(&self) -> &[CatchainNode] {
         &self.node_ids
     }
 
@@ -471,7 +471,7 @@ impl LogPlayerImpl {
     fn parse_body(
         replay_options: &LogReplayOptions,
         session_id: &SessionId,
-        _node_ids: &Vec<CatchainNode>,
+        _node_ids: &[CatchainNode],
         stop_flag: &Arc<AtomicBool>,
         listener: CatchainOverlayListenerPtr,
         replay_listener: CatchainOverlayLogReplayListenerPtr,
@@ -914,7 +914,7 @@ impl LogPlayerImpl {
         Ok(CatchainFactory::create_catchain(
             options,
             player.get_session_id(),
-            player.get_nodes(),
+            player.get_nodes().to_vec(),
             player.get_local_key(),
             log_replay_options.db_path.clone(),
             log_replay_options.db_suffix.clone(),
@@ -1041,7 +1041,7 @@ impl OverlayImpl {
         is_stopped_flag: Arc<AtomicBool>,
         _local_id: &PublicKeyHash,
         _overlay_short_id: &Arc<PrivateOverlayShortId>,
-        _nodes: &Vec<CatchainNode>,
+        _nodes: &[CatchainNode],
         listener: CatchainOverlayListenerPtr,
     ) -> Arc<OverlayImpl> {
         Arc::new(Self::new(should_stop_flag, is_stopped_flag, listener))

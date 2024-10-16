@@ -138,7 +138,7 @@ impl ProcessedUptoStuff {
             // enable this branch only if an extra boolean parameter is set
             return Ok(true)
         }
-        let shard_end_lt = self.compute_shard_end_lt(&enq.cur_prefix())?;
+        let shard_end_lt = self.compute_shard_end_lt(enq.cur_prefix())?;
         log::trace!(
             "already_processed: enq_hash={} shard_end_lt={shard_end_lt}, processed={}", 
             enq.message_hash().to_hex_string(), enq.enqueued_lt() < shard_end_lt
@@ -157,7 +157,7 @@ impl ProcessedUptoStuff {
                         self.seqno, self.last_msg_lt, self.last_msg_hash
                     )
                 )?
-                .find_shard_by_prefix(&prefix)?
+                .find_shard_by_prefix(prefix)?
                 .ok_or_else(
                     || error!(
                         "ProcessedUpTo record for {} ({}:{:x}) has no info about shard prefix {}",
@@ -306,7 +306,7 @@ impl OutMsgQueueInfoStuff {
 
         // unpack ProcessedUptoStuff
         let mut entries = vec![];
-        let mut min_seqno = std::u32::MAX;
+        let mut min_seqno = u32::MAX;
 
         for item in proc_info.clone().inner().iter() {
             let (key, mut value) = item?;
@@ -475,7 +475,7 @@ impl OutMsgQueueInfoStuff {
         ihr_pending.split_inplace(&sibling.shard_key(false))?;
 
         let mut entries = vec![];
-        let mut min_seqno = std::u32::MAX;
+        let mut min_seqno = u32::MAX;
         self.min_seqno = min_seqno;
         for mut entry in std::mem::take(&mut self.entries).drain(..) {
             if ShardIdent::shard_intersects(entry.shard, sibling.shard_prefix_with_tag()) {
@@ -520,7 +520,7 @@ impl OutMsgQueueInfoStuff {
     }
 
     pub fn serialize(&self) -> Result<(OutMsgQueueInfo, u32)> {
-        let mut min_seqno = std::u32::MAX;
+        let mut min_seqno = u32::MAX;
         let mut proc_info = ProcessedInfo::default();
         for entry in &self.entries {
             min_seqno = std::cmp::min(min_seqno, entry.mc_seqno());
@@ -587,7 +587,7 @@ impl OutMsgQueueInfoStuff {
 
     pub fn out_queue_or_part(&self) -> Result<&OutMsgQueue> {
         self.out_queue.as_ref()
-            .or_else(|| self.out_queue_part.as_ref())
+            .or(self.out_queue_part.as_ref())
             .ok_or_else(|| error!("INTERNAL ERROR: both `out_queue` and `out_queue_part` are None"))
     }
 
@@ -609,7 +609,7 @@ impl OutMsgQueueInfoStuff {
 
     pub fn message(&self, key: &OutMsgQueueKey) -> Result<Option<MsgEnqueueStuff>> {
         self.out_queue_or_part()?
-            .get_with_aug(&key)?
+            .get_with_aug(key)?
             .map(|(enq, lt)| MsgEnqueueStuff::from_enqueue_and_lt(enq, lt))
             .transpose()
     }
@@ -636,11 +636,11 @@ impl OutMsgQueueInfoStuff {
             // log::debug!("scanning OutMsgQueue entry with key {:x}", key);
             let lt = u64::construct_from(&mut slice)?;
             let enq = MsgEnqueueStuff::construct_from(&mut slice, lt)?;
-            if !old_shard.contains_full_prefix(&enq.cur_prefix()) {
+            if !old_shard.contains_full_prefix(enq.cur_prefix()) {
                 fail!("OutMsgQueue message with key {:x} does not contain current \
                     address belonging to shard {}", enq.out_msg_key(), old_shard)
             }
-            match new_shard.contains_full_prefix(&enq.cur_prefix()) {
+            match new_shard.contains_full_prefix(enq.cur_prefix()) {
                 true => Ok(HashmapFilterResult::Accept),
                 false => Ok(HashmapFilterResult::Remove)
             }
@@ -678,7 +678,7 @@ impl OutMsgQueueInfoStuff {
     pub fn entries(&self) -> &Vec<ProcessedUptoStuff> { &self.entries }
     pub fn min_seqno(&self) -> u32 { self.min_seqno }
     pub fn already_processed(&self, enq: &MsgEnqueueStuff) -> Result<bool> {
-        if self.shard().contains_full_prefix(&enq.next_prefix()) {
+        if self.shard().contains_full_prefix(enq.next_prefix()) {
             for entry in &self.entries {
                 if entry.already_processed(enq)? {
                     return Ok(true)
@@ -717,7 +717,7 @@ impl OutMsgQueueInfoStuff {
     pub fn is_reduced(&self) -> bool {
         Self::is_reduced_entries(&self.entries)
     }
-    fn is_reduced_entries(entries: &Vec<ProcessedUptoStuff>) -> bool {
+    fn is_reduced_entries(entries: &[ProcessedUptoStuff]) -> bool {
         let n = entries.len();
         for i in 1..n {
             for j in 0..i {
@@ -779,13 +779,14 @@ pub struct MsgQueueManager {
 
 impl MsgQueueManager {
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn init(
         engine: &Arc<dyn EngineOperations>,
         last_mc_state: &Arc<ShardStateStuff>,
         shard: ShardIdent,
         new_seq_no: u32,
         shards: &ShardHashes,
-        prev_states: &Vec<Arc<ShardStateStuff>>,
+        prev_states: &[Arc<ShardStateStuff>],
         next_state_opt: Option<&Arc<ShardStateStuff>>,
         after_merge: bool,
         after_split: bool,
@@ -829,7 +830,7 @@ impl MsgQueueManager {
                 let shard_state = engine.clone().wait_state(nb_block_id, Some(1_000), true).await?;
                 cached_states.insert(shard_state.clone());
 
-                Self::load_out_queue_info(&shard_state, &last_mc_state, &mut cached_states, block_descr.clone()).await?
+                Self::load_out_queue_info(&shard_state, last_mc_state, &mut cached_states, block_descr.clone()).await?
             } else {
                 log::debug!("{}: loading OutMsgQueueInfo of neighbor {:#}", block_descr, nb_shard_record.block_id());
                 let queue_part = 
@@ -860,16 +861,16 @@ impl MsgQueueManager {
 
         // TODO: `shards.is_empty()` might not be needed
         if shards.is_empty() || last_mc_state.block_id().seq_no() != 0 {
-            let nb = Self::load_out_queue_info(&last_mc_state, &last_mc_state, &mut cached_states, block_descr.clone()).await?;
+            let nb = Self::load_out_queue_info(last_mc_state, last_mc_state, &mut cached_states, block_descr.clone()).await?;
             neighbors.push(nb);
         }
 
-        let mut prev_out_queue_info = Self::load_out_queue_info(&prev_states[0], &last_mc_state, &mut cached_states, block_descr.clone()).await?;
+        let mut prev_out_queue_info = Self::load_out_queue_info(&prev_states[0], last_mc_state, &mut cached_states, block_descr.clone()).await?;
         if prev_states[0].block_id().seq_no != 0 {
             if let Some(merge_state) = prev_states.get(1) {
                 CHECK!(after_merge);
                 log::debug!("{}: prepare merge for states {} and {}", block_descr, prev_states[0].block_id(), merge_state.block_id());
-                let merge_out_queue_info = Self::load_out_queue_info(merge_state, &last_mc_state, &mut cached_states, block_descr.clone()).await?;
+                let merge_out_queue_info = Self::load_out_queue_info(merge_state, last_mc_state, &mut cached_states, block_descr.clone()).await?;
                 prev_out_queue_info.merge(merge_out_queue_info, split_queues, next_state_opt.is_some())?;
                 Self::add_trivial_neighbor_after_merge(&mut neighbors, &shard, &prev_out_queue_info, prev_states, &stop_flag, block_descr.clone())?;
             } else {
@@ -892,7 +893,7 @@ impl MsgQueueManager {
             }
         }
         let mut next_out_queue_info = match next_state_opt {
-            Some(next_state) => Self::load_out_queue_info(next_state, &last_mc_state, &mut cached_states, block_descr.clone()).await?,
+            Some(next_state) => Self::load_out_queue_info(next_state, last_mc_state, &mut cached_states, block_descr.clone()).await?,
             None => prev_out_queue_info.clone()
         };
 
@@ -927,7 +928,7 @@ impl MsgQueueManager {
         block_descr: Arc<String>,
     ) -> Result<OutMsgQueueInfoStuff> {
         log::debug!("{}: unpacking OutMsgQueueInfo of neighbor {:#}", block_descr, state.block_id());
-        let nb = OutMsgQueueInfoStuff::from_shard_state(&state, cached_states).await?;
+        let nb = OutMsgQueueInfoStuff::from_shard_state(state, cached_states).await?;
         // if (verbosity >= 2) {
         //     block::gen::t_ProcessedInfo.print(std::cerr, qinfo.proc_info);
         //     qinfo.proc_info->print_rec(std::cerr);
@@ -949,7 +950,7 @@ impl MsgQueueManager {
 
     fn already_processed(&self, enq: &MsgEnqueueStuff) -> Result<(bool, u64)> {
         for neighbor in &self.neighbors {
-            if !neighbor.is_disabled() && neighbor.already_processed(&enq)? {
+            if !neighbor.is_disabled() && neighbor.already_processed(enq)? {
                 return Ok((true, neighbor.end_lt()))
             }
         }
@@ -980,20 +981,18 @@ impl MsgQueueManager {
     }
 
     fn add_trivial_neighbor_after_merge(
-        neighbors: &mut Vec<OutMsgQueueInfoStuff>,
+        neighbors: &mut [OutMsgQueueInfoStuff],
         shard: &ShardIdent,
         real_out_queue_info: &OutMsgQueueInfoStuff,
-        prev_states: &Vec<Arc<ShardStateStuff>>,
+        prev_states: &[Arc<ShardStateStuff>],
         stop_flag: &Option<&AtomicBool>,
         block_descr: Arc<String>,
     ) -> Result<()> {
         log::debug!("{}: in add_trivial_neighbor_after_merge()", block_descr);
         CHECK!(prev_states.len(), 2);
         let mut found = 0;
-        let n = neighbors.len();
-        for i in 0..n {
-            if shard.intersect_with(neighbors[i].shard()) {
-                let nb = &neighbors[i];
+        for (i, nb) in neighbors.iter_mut().enumerate() {
+            if shard.intersect_with(nb.shard()) {
                 found += 1;
                 log::debug!("{}: neighbor #{} : {} intersects our shard {}", block_descr, i, nb.block_id(), shard);
                 if !shard.is_parent_for(nb.shard()) || found > 2 {
@@ -1005,13 +1004,13 @@ impl MsgQueueManager {
                         nb.shard(), prev_shard)
                 }
                 if found == 1 {
-                    neighbors[i] = real_out_queue_info.clone();
+                    *nb = real_out_queue_info.clone();
                     log::debug!("{}: adjusted neighbor #{} : {} with shard expansion \
-                        (immediate after-merge adjustment)", block_descr, i, neighbors[i].block_id());
+                        (immediate after-merge adjustment)", block_descr, i, nb.block_id());
                 } else {
-                    neighbors[i].disable();
+                    nb.disable();
                     log::debug!("{}: disabling neighbor #{} : {} \
-                        (immediate after-merge adjustment)", block_descr, i, neighbors[i].block_id());
+                        (immediate after-merge adjustment)", block_descr, i, nb.block_id());
                 }
 
                 check_stop_flag(stop_flag)?;
@@ -1021,6 +1020,7 @@ impl MsgQueueManager {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn add_trivial_neighbor(
         neighbors: &mut Vec<OutMsgQueueInfoStuff>,
         shard: &ShardIdent,
@@ -1061,7 +1061,7 @@ impl MsgQueueManager {
                     *nb = real_out_queue_info.clone();
                     log::debug!("{}: adjusted neighbor #{} : {} (simple replacement)", block_descr, i, nb.block_id());
                     cs = 1;
-                } else if nb.shard().is_parent_for(&shard) {
+                } else if nb.shard().is_parent_for(shard) {
                     // case 2. Immediate after-split.
                     CHECK!(found == 1);
                     CHECK!(sibling_out_queue_info.is_some());

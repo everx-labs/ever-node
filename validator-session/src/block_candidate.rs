@@ -255,7 +255,7 @@ impl BlockCandidate for BlockCandidateImpl {
             return block.get_source_index();
         }
 
-        std::u32::MAX
+        u32::MAX
     }
 
     /*

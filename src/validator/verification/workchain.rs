@@ -130,7 +130,7 @@ impl Workchain {
     fn bls_key_to_string(key: &Option<[u8; BLS_PUBLIC_KEY_LEN]>) -> String {
         match key {
             None => "N/A".to_string(),
-            Some(key) => hex::encode(&key),
+            Some(key) => hex::encode(key),
         }
     }
 
@@ -147,6 +147,7 @@ impl Workchain {
         UInt256::calc_file_hash(&overlay_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         engine: EnginePtr,
         runtime: tokio::runtime::Handle,
@@ -182,7 +183,7 @@ impl Workchain {
 
             if public_key.id() == local_id {
                 wc_local_idx = idx as i16;
-                local_adnl_id = Some(get_adnl_id(&desc));
+                local_adnl_id = Some(get_adnl_id(desc));
                 break;
             }
         }
@@ -192,7 +193,7 @@ impl Workchain {
 
             if public_key.id() == local_id {
                 mc_local_idx = idx as i16;
-                local_adnl_id = Some(get_adnl_id(&desc));
+                local_adnl_id = Some(get_adnl_id(desc));
                 break;
             }
         }
@@ -222,10 +223,10 @@ impl Workchain {
         let wc_validators_count = wc_validators.len();
 
         for (i, desc) in wc_validators.iter_mut().enumerate() {
-            let adnl_id = get_adnl_id(&desc);
+            let adnl_id = get_adnl_id(desc);
             //let adnl_id = desc.adnl_addr.clone().map_or("** no-addr **".to_string(), |x| x.to_hex_string());
             let public_key = sigpubkey_to_publickey(&desc.public_key);
-            let mut bls_public_key = desc.bls_public_key.clone();
+            let mut bls_public_key = desc.bls_public_key;
 
             if bls_public_key.is_none() && use_debug_bls_keys {
                 match utils::generate_test_bls_key(&public_key) {
@@ -256,10 +257,7 @@ impl Workchain {
                     desc.weight as f64 / wc_total_weight as f64 * 100.0);
             }
 
-            wc_pub_keys.push(match bls_public_key {
-                Some(bls_public_key) => bls_public_key.clone().into(),
-                None => [0; BLS_PUBLIC_KEY_LEN],
-            });
+            wc_pub_keys.push(bls_public_key.unwrap_or([0; BLS_PUBLIC_KEY_LEN]));
         }
 
         let mc_total_weight: ValidatorWeight = mc_validators.iter().map(|desc| desc.weight).sum();
@@ -273,7 +271,7 @@ impl Workchain {
         );
 
         for (i, desc) in mc_validators.iter().enumerate() {
-            let adnl_id = get_adnl_id(&desc);
+            let adnl_id = get_adnl_id(desc);
             //let adnl_id = desc.adnl_addr.clone().map_or("** no-addr **".to_string(), |x| x.to_hex_string());
             let public_key = sigpubkey_to_publickey(&desc.public_key);
 
@@ -296,16 +294,16 @@ impl Workchain {
             workchain_id,
             node_debug_id,
             runtime: runtime.clone(),
-            wc_validators_adnl_ids: wc_validators.iter().map(|desc| get_adnl_id(&desc)).collect(),
+            wc_validators_adnl_ids: wc_validators.iter().map(get_adnl_id).collect(),
             wc_validators,
-            mc_validators_adnl_ids: mc_validators.iter().map(|desc| get_adnl_id(&desc)).collect(),
+            mc_validators_adnl_ids: mc_validators.iter().map(get_adnl_id).collect(),
             mc_validators: mc_validators.clone(),
             wc_validator_set_hash,
             mc_validator_set_hash,
             wc_total_weight,
             mc_total_weight,
             local_bls_key: local_bls_key.clone(),
-            local_adnl_id: local_adnl_id.clone().into(),
+            local_adnl_id: local_adnl_id.clone(),
             local_id: local_id.clone(),
             wc_local_idx,
             mc_local_idx,
@@ -654,8 +652,8 @@ impl Workchain {
     /// Debug dump state
     pub fn dump_state(&self, result: &mut string_builder::Builder) {      
         let blocks = self.blocks.lock().clone();
-        let mut blocks: Vec<(std::time::SystemTime, BlockPtr)> = blocks.into_iter().map(|(_candidate_id, block)| {
-            (block.lock().get_first_appearance_time().clone(), block.clone())
+        let mut blocks: Vec<(std::time::SystemTime, BlockPtr)> = blocks.into_values().map(|block| {
+            (*block.lock().get_first_appearance_time(), block.clone())
         }).collect::<Vec<_>>();
 
         blocks.sort_by(|a, b| b.0.cmp(&a.0));
@@ -691,10 +689,10 @@ impl Workchain {
 
         result.append(format!("  - block_lifetime_period: {:.3}s\n", Duration::from_millis(config_params.block_lifetime_period_ms as u64).as_secs_f64()));
         result.append(format!("  - block_sync_lifetime_period: {:.3}s\n", Duration::from_millis(config_params.block_sync_lifetime_period_ms as u64).as_secs_f64()));
-        result.append(format!("  - blocks:\n"));
+        result.append("  - blocks:\n".to_string());
 
         for (i, (_first_appearance_time, block)) in blocks.iter().enumerate() {
-            result.append(format!("      - b{:03} {}\n", i, self.get_readable_block_info(&block)));
+            result.append(format!("      - b{:03} {}\n", i, self.get_readable_block_info(block)));
         }
     }
 
@@ -812,10 +810,7 @@ impl Workchain {
 
     /// Get block by its ID without lock
     fn get_block_by_id_impl(blocks: &HashMap<UInt256, BlockPtr>, block_id: &BlockIdExt) -> Option<BlockPtr> {
-        match blocks.get(&Self::get_candidate_id(block_id)) {
-            Some(block) => Some(block.clone()),
-            None => None,
-        }
+        blocks.get(&Self::get_candidate_id(block_id)).cloned()
     }
 
     /// Put new block to map
@@ -836,7 +831,7 @@ impl Workchain {
 
                     let new_block = Block::create(
                         block_id,
-                        &*self.blocks_instance_counter,
+                        &self.blocks_instance_counter,
                         self.wc_validators.len(),
                         self.mc_validators.len()
                     );
@@ -870,7 +865,7 @@ impl Workchain {
 
                 //set block status to delivered
 
-                self.set_block_status(&block_id, None);
+                self.set_block_status(block_id, None);
 
                 //initiate verification of the block
 
@@ -928,21 +923,21 @@ impl Workchain {
 
         //remove old blocks
 
-        if let Ok(_) = block_end_of_life_time.elapsed() {
+        if block_end_of_life_time.elapsed().is_ok() {
             workchain.remove_block(&block_id);
             return; //prevent all further sync logic because the block is expired
         }
 
         let mut rng = rand::thread_rng();
         let delay = Duration::from_millis(rng.gen_range(
-            config_params.min_block_sync_period_ms,
+            config_params.min_block_sync_period_ms..
             config_params.max_block_sync_period_ms + 1,
         ) as u64);
         let next_sync_time = SystemTime::now() + delay;
         let far_neighbours_force_sync = far_neighbours_sync_time.is_some() && far_neighbours_sync_time.unwrap().elapsed().is_ok();
         let far_neighbours_sync_time = {
             if far_neighbours_sync_time.is_none() || far_neighbours_force_sync {
-                Some(SystemTime::now() + Duration::from_millis(rng.gen_range(config_params.min_far_neighbours_sync_period_ms,
+                Some(SystemTime::now() + Duration::from_millis(rng.gen_range(config_params.min_far_neighbours_sync_period_ms..
                                         config_params.max_far_neighbours_sync_period_ms + 1) as u64))
             } else {
                 far_neighbours_sync_time
@@ -980,18 +975,16 @@ impl Workchain {
             let workchain_id = workchain.workchain_id;
             let node_debug_id = workchain.node_debug_id.clone();
 
-            if far_neighbours_force_sync {
-                if delivery_weight > 0 && delivery_weight < workchain.wc_total_weight {
-                    trace!(
-                        target: "verificator",
-                        "Force block {:?} synchronization for workchain's #{} private overlay between far neighbours (overlay={})",
-                        block_id,
-                        workchain_id,
-                        node_debug_id);
+            if far_neighbours_force_sync && delivery_weight > 0 && delivery_weight < workchain.wc_total_weight {
+                trace!(
+                    target: "verificator",
+                    "Force block {:?} synchronization for workchain's #{} private overlay between far neighbours (overlay={})",
+                    block_id,
+                    workchain_id,
+                    node_debug_id);
 
-                    workchain.send_block_status_to_far_neighbours(&block, delivery_params.block_status_far_neighbours_count,
-                        Duration::from_millis(config_params.far_neighbours_resync_period_ms as u64));
-                }
+                workchain.send_block_status_to_far_neighbours(&block, delivery_params.block_status_far_neighbours_count,
+                    Duration::from_millis(config_params.far_neighbours_resync_period_ms as u64));
             }
         }
 
@@ -1044,7 +1037,7 @@ impl Workchain {
 
         //register block
 
-        let block = self.add_block_impl(&block_id, Some(block_candidate.clone()));
+        let block = self.add_block_impl(block_id, Some(block_candidate.clone()));
 
         block.lock().get_delivery_stats().in_candidates_count.fetch_add(1, Ordering::SeqCst);
 
@@ -1052,6 +1045,7 @@ impl Workchain {
     }
 
     /// Merge block status
+    #[allow(clippy::too_many_arguments)]
     fn merge_block_status(
         &self,
         block_id: &BlockIdExt,
@@ -1304,7 +1298,7 @@ impl Workchain {
         external_request_time: &std::time::SystemTime) {
         let block = self.add_block_impl(block_id, None);
 
-        self.update_block_external_delivery_metrics_impl(&block, Some(external_request_time.clone()), None);
+        self.update_block_external_delivery_metrics_impl(&block, Some(*external_request_time), None);
     }
 
     fn update_block_external_delivery_metrics_impl(
@@ -1436,7 +1430,7 @@ impl Workchain {
 
         //load block candidate
 
-        let block_handle = match self.engine.load_block_handle(&block_id) {
+        let block_handle = match self.engine.load_block_handle(block_id) {
             Ok(Some(block_handle)) => block_handle,
             Err(err) => {
                 log::warn!(target: "verificator", "Can't load block handle for block ID {:?} in workchain {}: {:?}", block_id, self.node_debug_id, err);
@@ -1602,7 +1596,7 @@ impl Workchain {
     }
 
     /// Get node index by adnl id
-    fn get_validator_idx_by_adnl_id(&self, node_adnl_ids: &Vec<PublicKeyHash>, adnl_id: &PublicKeyHash) -> Option<usize> {
+    fn get_validator_idx_by_adnl_id(&self, node_adnl_ids: &[PublicKeyHash], adnl_id: &PublicKeyHash) -> Option<usize> {
         for (idx, src_adnl_id) in node_adnl_ids.iter().enumerate() {
             if src_adnl_id == adnl_id {
                 return Some(idx);
@@ -1620,13 +1614,13 @@ impl Workchain {
 
         self.process_block_status_counter.increment(1);
 
-        let wc_pub_key_refs: Vec<&[u8; BLS_PUBLIC_KEY_LEN]> = self.wc_pub_keys.iter().map(|x| x).collect();
+        let wc_pub_key_refs: Vec<&[u8; BLS_PUBLIC_KEY_LEN]> = self.wc_pub_keys.iter().collect();
 
         //parse incoming status
 
         //TODO: add incoming block status signature check to prevent malicious status updates
 
-        let block_id: BlockIdExt = block_status.id.clone().into();
+        let block_id: BlockIdExt = block_status.id.clone();
         let candidate_id = Self::get_candidate_id(&block_id);
         let deliveries_signature = MultiSignature::deserialize(1, &candidate_id, &wc_pub_key_refs, &block_status.deliveries_signature);
         let approvals_signature = MultiSignature::deserialize(2, &candidate_id, &wc_pub_key_refs, &block_status.approvals_signature);
@@ -1748,7 +1742,7 @@ impl Workchain {
         let mut validators = Vec::with_capacity(count);
 
         for _i in 0..count {
-            let idx = rng.gen_range(0, self.wc_validators.len());
+            let idx = rng.gen_range(0..self.wc_validators.len());
 
             if idx == self.wc_local_idx as usize {
                 continue;
@@ -1764,7 +1758,7 @@ impl Workchain {
     fn send_block_status_to_workchain(&self, block: &BlockPtr, nodes_count: usize) {        
         let nodes = self.generate_random_wc_validators(nodes_count);
 
-        if nodes.len() < 1 {
+        if nodes.is_empty() {
             return;
         }
 
@@ -1798,7 +1792,7 @@ impl Workchain {
     fn send_block_status_to_forwarding_neighbours(&self, block: &BlockPtr, neighbours_count: usize) {
         let forwarding_neighbours = self.generate_random_wc_validators(neighbours_count);
 
-        if forwarding_neighbours.len() < 1 {
+        if forwarding_neighbours.is_empty() {
             return;
         }
 
@@ -1834,7 +1828,7 @@ impl Workchain {
         let wc_cutoff_weight = self.get_wc_cutoff_weight();
         let far_neighbours = block.lock().calc_low_delivery_wc_nodes_indexes(max_neighbours_count, wc_cutoff_weight, self.wc_local_idx as usize, max_far_neighbours_sync_time);
 
-        if far_neighbours.len() < 1 {
+        if far_neighbours.is_empty() {
             return;
         }
 
@@ -1876,10 +1870,9 @@ impl Workchain {
             
             payload.append(&mut local_key_payload);
 
-            let payload_ptr = unsafe { std::slice::from_raw_parts(payload.as_ptr() as *const u8, payload.len()) };
-            let hash = crc32_digest(payload_ptr);
+            let hash = crc32_digest(&payload);
 
-            if self.wc_validators.len () < 1 {
+            if self.wc_validators.is_empty() {
                 return false; //no verification in empty workchain
             }
             let random_value = (((hash as usize) % self.wc_validators.len()) as f64) / (self.wc_validators.len() as f64);            
@@ -1941,15 +1934,14 @@ impl Workchain {
                     let _hang_checker = HangCheck::new(runtime, format!("Workchain::verify_block: {} for workchain {}", block_id, node_debug_id), Duration::from_millis(2000));
 
                     let candidate = super::BlockCandidate {
-                        block_id: block_candidate.candidate().id.clone().into(),
-                        data: block_candidate.candidate().data.to_vec().into(),
+                        block_id: block_candidate.candidate().id.clone(),
+                        data: block_candidate.candidate().data.to_vec(),
                         collated_file_hash: block_candidate
                             .candidate()
                             .collated_data_file_hash
-                            .clone()
-                            .into(),
-                        collated_data: block_candidate.candidate().collated_data.to_vec().into(),
-                        created_by: block_candidate.candidate().created_by.clone().into(),
+                            .clone(),
+                        collated_data: block_candidate.candidate().collated_data.to_vec(),
+                        created_by: block_candidate.candidate().created_by.clone(),
                     };
 
                     let verification_status = verification_listener.verify(&candidate).await;
@@ -1986,27 +1978,27 @@ impl Workchain {
     }
 
     /// Send message to forwarding neighbours in a private workchain overlay
-    fn send_message_to_forwarding_neighbours(&self, data: BlockPayloadPtr, neighbours: &Vec<usize>) {
+    fn send_message_to_forwarding_neighbours(&self, data: BlockPayloadPtr, neighbours: &[usize]) {
         if let Some(workchain_overlay) = self.get_workchain_overlay() {
             workchain_overlay.send_message_to_forwarding_neighbours(data, neighbours);
         }
     }
 
     /// Send message to far neighbours in a private workchain overlay
-    fn send_message_to_far_neighbours(&self, data: BlockPayloadPtr, neighbours: &Vec<usize>) {
+    fn send_message_to_far_neighbours(&self, data: BlockPayloadPtr, neighbours: &[usize]) {
         if let Some(workchain_overlay) = self.get_workchain_overlay() {
             workchain_overlay.send_message_to_far_neighbours(data, neighbours);
         }
     }
 
     /// Send message to workchain validators in a private workchain overlay
-    fn send_message_to_workchain_validators(&self, data: BlockPayloadPtr, validators: &Vec<usize>) {
+    fn send_message_to_workchain_validators(&self, data: BlockPayloadPtr, validators: &[usize]) {
         if let Some(mc_overlay) = self.get_mc_overlay() {
             //convert nodes indexes to full list of validators indexes (shifted by number of MC validators)
 
-            let validators = validators.clone().iter().map(|idx| *idx + self.mc_validators.len()).collect();            
+            let validators = validators.iter().map(|idx| *idx + self.mc_validators.len());
 
-            mc_overlay.send_message_to_validators(data, &validators);
+            mc_overlay.send_message_to_validators(data, &validators.collect::<Vec<usize>>());
         }
     }
 
@@ -2039,7 +2031,7 @@ impl Workchain {
             block.lock().get_delivery_stats().out_mc_sends_count.fetch_add(1, Ordering::SeqCst);
 
             let serialized_block_status = block.lock().serialize();
-            let validators = vec![mc_node_idx];
+            let validators = [mc_node_idx];
             
             block.lock().set_mc_node_status_sent_time(mc_node_idx, SystemTime::now());
 
@@ -2159,12 +2151,10 @@ impl Workchain {
                                 break;
                             }
                         }
-                    } else {
-                        if let Ok(block_gen_time) = mc_block_handle.gen_utime() {
-                            let diff = engine.now() - block_gen_time;
-                            if diff > 15 {
-                                log::warn!(target:"verificator", "No next mc block more then {diff} sec");
-                            }
+                    } else if let Ok(block_gen_time) = mc_block_handle.gen_utime() {
+                        let diff = engine.now() - block_gen_time;
+                        if diff > 15 {
+                            log::warn!(target:"verificator", "No next mc block more then {diff} sec");
                         }
                     }
     
@@ -2187,7 +2177,7 @@ impl WorkchainOverlayListener for Workchain {
         block_status: BlockCandidateStatus,
         received_from_workchain: bool,
     ) -> Result<BlockPtr> {
-        let block_id: BlockIdExt = block_status.id.clone().into();
+        let block_id: BlockIdExt = block_status.id.clone();
         let _hang_checker = HangCheck::new(self.runtime.clone(), format!("Workchain::on_workchain_block_status_updated: {} for workchain {}", block_id, self.node_debug_id), Duration::from_millis(1000));
 
         self.process_block_status(adnl_id, block_status, received_from_workchain)

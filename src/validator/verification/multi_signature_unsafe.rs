@@ -12,7 +12,7 @@
 */
 
 use super::*;
-use ever_block::{crc32_digest, fail, Result, bls::BLS_PUBLIC_KEY_LEN};
+use ever_block::{crc32_digest, error, Result, bls::BLS_PUBLIC_KEY_LEN};
 use validator_session::ValidatorWeight;
 
 /*
@@ -84,9 +84,7 @@ impl MultiSignature {
             }
         }
 
-        for i in remaining_idx..remaining.len() {
-            sorted.push(remaining[i]);
-        }
+        sorted.extend_from_slice(&remaining[remaining_idx..]);
 
         if self.nodes.len() != sorted.len() {
             //new elements appeared
@@ -110,7 +108,7 @@ impl MultiSignature {
 
     /// Is the signature empty
     pub fn empty(&self) -> bool {
-        self.nodes.len() == 0
+        self.nodes.is_empty()
     }
 
     /// Check if node signature is present
@@ -119,7 +117,7 @@ impl MultiSignature {
     }
 
     /// Total weight
-    pub fn get_total_weight(&self, validators: &Vec<ValidatorDescr>) -> ValidatorWeight {
+    pub fn get_total_weight(&self, validators: &[ValidatorDescr]) -> ValidatorWeight {
         let mut total_weight = 0;
 
         for validator_idx in &self.nodes {
@@ -155,14 +153,9 @@ impl MultiSignature {
     }
 
     /// Deserialize signature
-    pub fn deserialize(_type: u8, _candidate_id: &UInt256, _wc_pub_key_refs: &Vec<&[u8; BLS_PUBLIC_KEY_LEN]>, serialized_signature: &[u8]) -> Result<Self> {
-        let decoded = inflate::inflate_bytes(serialized_signature);
-
-        if let Err(err) = decoded {
-            fail!("inflate error: {}", err);
-        }
-
-        let decoded = decoded.unwrap();
+    pub fn deserialize(_type: u8, _candidate_id: &UInt256, _wc_pub_key_refs: &[&[u8; BLS_PUBLIC_KEY_LEN]], serialized_signature: &[u8]) -> Result<Self> {
+        let decoded = inflate::inflate_bytes(serialized_signature)
+            .map_err(|err| error!("inflate error: {}", err))?;
 
         let decoded = Self::raw_words_access(&decoded);
         let mut body = Self {

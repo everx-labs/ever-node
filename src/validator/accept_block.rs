@@ -35,6 +35,7 @@ use ton_api::ton::ton_node::{
     broadcast::{BlockBroadcast, QueueUpdateBroadcast, MeshUpdateBroadcast}
 };
 
+#[allow(clippy::too_many_arguments)]
 pub async fn accept_block(
     id: BlockIdExt,
     data: Option<Vec<u8>>,
@@ -51,7 +52,7 @@ pub async fn accept_block(
     let is_fake = false;
     let is_fork = false;
 
-    if prev.len() == 0 || prev.len() > 2 {
+    if prev.is_empty() || prev.len() > 2 {
         fail!("`prev` has invalid length");
     }
 
@@ -110,7 +111,7 @@ pub async fn accept_block(
             &block,
             signatures.clone(),
             &last_mc_state,
-            &prev,
+            prev,
             engine.deref()
         ).await? {
 
@@ -212,6 +213,7 @@ pub async fn accept_block(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn accept_block_routine(
     id: &BlockIdExt,
     block_opt: Option<BlockStuff>,
@@ -223,7 +225,7 @@ pub async fn accept_block_routine(
     is_fork:  bool
 ) -> Result<Option<(Arc<BlockHandle>, BlockStuff, BlockProofStuff, BlockSignatures)>> {
 
-    let handle_opt = if let Some(handle) = engine.load_block_handle(&id)? {
+    let handle_opt = if let Some(handle) = engine.load_block_handle(id)? {
         if handle.is_applied() {
             return Ok(None)
         }
@@ -238,7 +240,7 @@ pub async fn accept_block_routine(
     #[cfg(feature = "telemetry")]
     let mut block_broadcast = block_opt.is_some();
 
-    let block_descr = fmt_block_id_short(&id);
+    let block_descr = fmt_block_id_short(id);
 
     let block = match block_opt {
         Some(b) => b,
@@ -246,12 +248,12 @@ pub async fn accept_block_routine(
             let block = match &handle_opt {
                 Some(h) if h.has_data() => {
                     log::debug!(target: "validator", "({}): accept_block: loading block from db", block_descr);
-                    let block = engine.load_block(h).await?;
-                    block
+                    
+                    engine.load_block(h).await?
                 }
                 _ => {
                     log::debug!(target: "validator", "({}): accept_block: downloading block", block_descr);
-                    let (block, _proof) = engine.download_block(&id, Some(10)).await?;
+                    let (block, _proof) = engine.download_block(id, Some(10)).await?;
                     block
                 }
             };
@@ -294,17 +296,17 @@ pub async fn accept_block_routine(
         &handle,
         &block,
         &(prev[0].clone(), prev.get(1).cloned()),
-        &engine
+        engine
     ).await?;
 
 
     let (proof, signatures) = create_new_proof(
         &block,
-        &validator_set,
+        validator_set,
         signatures)?;
 
     log::debug!(target: "validator", "({}): accept_block: storing block proof", block_descr);
-    handle = engine.store_block_proof(0, &id, Some(handle), &proof).await?
+    handle = engine.store_block_proof(0, id, Some(handle), &proof).await?
         .to_non_created()
         .ok_or_else(
             || error!("INTERNAL ERROR: accept for block {} proof mismatch", id)
@@ -465,14 +467,12 @@ fn create_new_proof_internal(
         |h| roots.contains(h),
     )?;
 
-    if id.shard().is_masterchain() && !block.read_info()?.key_block() {
-        if block
+    if id.shard().is_masterchain() && !block.read_info()?.key_block() && block
             .read_extra()?
             .read_custom()?
             .ok_or_else(|| error!("can not extract masterchain block extra from key block {}", id))?
             .is_key_block() {
-                fail!("extra header of non-key masterchain block {} declares key_block=true", id);
-        }
+            fail!("extra header of non-key masterchain block {} declares key_block=true", id);
     }
 
     if force_proof_link {
@@ -583,7 +583,7 @@ pub async fn create_top_shard_block_description(
     block: &BlockStuff,
     signatures: BlockSignatures,
     mc_state: &Arc<ShardStateStuff>,
-    prev: &Vec<BlockIdExt>,
+    prev: Vec<BlockIdExt>,
     engine: &dyn EngineOperations,
 ) -> Result<Option<TopBlockDescr>> {
 
@@ -702,7 +702,7 @@ fn find_known_ancestors(
 
 async fn build_proof_chain(
     block: &BlockStuff,
-    prev: &Vec<BlockIdExt>,
+    prev: Vec<BlockIdExt>,
     oldest_ancestor_seqno: u32,
     ancestors: Vec<McShardRecord>,
     engine: &dyn EngineOperations,
@@ -714,7 +714,7 @@ async fn build_proof_chain(
     )?;
     let mut proof_links = vec![engine.load_block_proof(&handle, true).await?];
     let mut mc_block_id = block.construct_master_id()?;
-    let mut link_prev = prev.clone();
+    let mut link_prev = prev;
 
     loop {
         let last_proof = proof_links.last().unwrap();
@@ -837,13 +837,13 @@ fn build_block_broadcast(
 
 ) -> Result<BlockBroadcast> {
     log::trace!(target: "validator", "accept_block {}: build_block_broadcast", block.id());
-    let packed_signatures = pack_signatures(&signatures)?;
+    let packed_signatures = pack_signatures(signatures)?;
     Ok(
         BlockBroadcast {
             id: block.id().clone(),
             catchain_seqno: validator_set.catchain_seqno() as i32,
             validator_set_hash: signatures.validator_info.validator_list_hash_short as i32,
-            signatures: packed_signatures.into(),
+            signatures: packed_signatures,
             proof: proof.drain_data(),
             data: block.data().to_vec()
         }
@@ -858,7 +858,7 @@ fn build_queue_update_broadcasts(
 
     log::trace!(target: "validator", "accept_block {}: build_queue_update_broadcasts", block.id());
 
-    let packed_signatures = pack_signatures(&signatures)?;
+    let packed_signatures = pack_signatures(signatures)?;
     let mut broadcasts = vec!();
 
     if let Some(updates) = block.block()?.out_msg_queue_updates.as_ref() {
@@ -869,7 +869,7 @@ fn build_queue_update_broadcasts(
                     id: block.id().clone(),
                     catchain_seqno: validator_set.catchain_seqno() as i32,
                     validator_set_hash: signatures.validator_info.validator_list_hash_short as i32,
-                    signatures: packed_signatures.clone().into(),
+                    signatures: packed_signatures.clone(),
                     data: update,
                     target_wc: wc_id
                 });

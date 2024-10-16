@@ -2418,7 +2418,7 @@ impl ReceiverImpl {
     fn new(
         listener: ReceiverListenerPtr,
         incarnation: &SessionId,
-        ids: &Vec<CatchainNode>,
+        ids: &[CatchainNode],
         local_key: &PrivateKey,
         path: String,
         db_suffix: String,
@@ -2582,7 +2582,7 @@ impl ReceiverImpl {
     pub(crate) fn create(
         listener: ReceiverListenerPtr,
         incarnation: &SessionId,
-        ids: &Vec<CatchainNode>,
+        ids: &[CatchainNode],
         local_key: &PrivateKey,
         path: String,
         db_suffix: String,
