@@ -2,7 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
-## Version 0.60.5
+## Version 0.60.6
+
+- SMFT arbitrage
+
+## Version 0.60.6
 
 - Fixed clippy warnings
 
