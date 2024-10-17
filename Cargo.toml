@@ -85,16 +85,16 @@ string-builder = '0.2'
 thiserror = '1.0'
 tokio = { features = [ 'rt-multi-thread' ], version = '1.40' }
 tokio-util = '0.7'
-adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.11.28' }
+adnl = { features = [ 'client', 'node', 'server' ], git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.11.29' }
 catchain = { path = 'catchain' }
 ever_abi = { git = 'https://github.com/everx-labs/ever-abi.git', tag = '2.7.10' }
 ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.11.19' }
-ever_block_json = { git = 'https://github.com/everx-labs/ever-block-json.git', tag = '0.9.35' }
+ever_block_json = { git = 'https://github.com/everx-labs/ever-block-json.git', tag = '0.9.36' }
 ever_executor = { git = 'https://github.com/everx-labs/ever-executor.git', tag = '1.18.21' }
 ever_vm = { git = 'https://github.com/everx-labs/ever-vm.git', tag = '2.2.20' }
 lockfree = { git = 'https://github.com/everx-labs/lockfree.git' }
 storage = { path = 'storage' }
-ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.4.27' }
+ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.4.28' }
 validator_session = { path = 'validator-session' }
 
 [dev-dependencies]

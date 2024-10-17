@@ -16,10 +16,10 @@ use rustracing_jaeger::{
     reporter::JaegerCompactReporter, span::SpanContext, span::SpanReceiver, Tracer,
 };
 use std::net::ToSocketAddrs;
+use std::sync::LazyLock;
 use std::{collections::HashMap, env, sync::Mutex};
 
-use ever_block::fail;
-use ever_block::types::*;
+use ever_block::{fail, Result};
 
 #[allow(dead_code)]
 enum LogKind {
@@ -33,13 +33,12 @@ struct JaegerHelper {
     span_rx: SpanReceiver,
 }
 
-lazy_static::lazy_static! {
-    static ref JAEGER: Option<Mutex<JaegerHelper>> = JaegerHelper::new("r-node");
-}
+static JAEGER: LazyLock<Option<Mutex<JaegerHelper>>> = LazyLock::new(|| JaegerHelper::new("r-node"));
 
-pub fn init_jaeger() {
-    lazy_static::initialize(&JAEGER);
-    log::trace!("Jaeger lazy init");
+pub fn init_jaeger() -> bool {
+    let inited = JAEGER.is_some();
+    log::trace!("Jaeger lazy inited: {}", inited);
+    inited
 }
 
 #[cfg(feature = "external_db")]
@@ -50,7 +49,7 @@ pub fn message_from_kafka_received(kf_key: &[u8]) {
             Ok(mut helper) => {
                 if msg_id_bytes.len() == 32 {
                     let msg_id = hex::encode(&msg_id_bytes);
-                    helper.send_span(msg_id, "kafka msg received".to_string());
+                    helper.send_span(msg_id, "kafka msg received");
                 } else {
                     log::error!(target: "jaeger", "Corrupted key field in message from q-server");
                 }
@@ -65,9 +64,7 @@ pub fn message_from_kafka_received(kf_key: &[u8]) {
 pub fn broadcast_sended(msg_id: String) {
     if let Some(jaeger) = JAEGER.as_ref() {
         tokio::task::spawn_blocking(move || match jaeger.lock() {
-            Ok(mut helper) => {
-                helper.send_span(msg_id, "broadcast sended".to_string())
-            },
+            Ok(mut helper) => helper.send_span(msg_id, "broadcast sended"),
             Err(e) => {
                 log::error!(target: "jaeger", "Mutex locking error: {}", e);
             }
@@ -76,7 +73,6 @@ pub fn broadcast_sended(msg_id: String) {
 }
 
 impl JaegerHelper {
-
     pub fn new(service_name: &str) -> Option<Mutex<JaegerHelper>> {
         let (span_tx, span_rx) = crossbeam_channel::bounded(1000);
         let tracer = Tracer::with_sender(AllSampler, span_tx);
@@ -108,23 +104,17 @@ impl JaegerHelper {
             Ok(Some(url)) => url,
             _ => {
                 log::error!(
-                    target: "jaeger", 
+                    target: "jaeger",
                     "Invalid JAEGER_* env. Can't parse string to valid address"
                 );
-                return None
+                return None;
             }
         };
-        match reporter.set_agent_addr(agent_url) {
-            Ok(_) => log::info!(
-                target: "jaeger", 
-                "Init done with addr {}:{}", agent_host, agent_port
-            ),
-            Err(e) => log::error!(
-                target: "jaeger", 
-                "Can't set agent address to jaeger library. Internal rust_jaegertracing error: {}",
-                e
-            )
-        }
+        reporter.set_agent_addr(agent_url);
+        log::info!(
+            target: "jaeger",
+            "Init done with addr {}:{}", agent_host, agent_port
+        );
         let ret = JaegerHelper {
             tracer,
             reporter,
@@ -133,7 +123,7 @@ impl JaegerHelper {
         Some(Mutex::new(ret))
     }
 
-    pub fn send_span(&mut self, msg_id: String, span_name: String) {
+    fn send_span(&mut self, msg_id: String, span_name: &'static str) {
         match self.create_root_span(msg_id) {
             Ok(span_root) => {
                 self.start_span(span_root, span_name);
@@ -156,7 +146,7 @@ impl JaegerHelper {
         }
     }
 
-    fn start_span(&mut self, ctx: SpanContext, name: String) {
+    fn start_span(&mut self, ctx: SpanContext, name: &'static str) {
         let _span = self.tracer.span(name).child_of(&ctx).start();
         log::trace!(target: "jaeger", "Span started");
     }
