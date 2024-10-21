@@ -40,14 +40,14 @@ async fn run_cold(
     CHECK!(block_id.shard().is_masterchain());
     CHECK!(block_id.seq_no >= engine.get_last_fork_masterchain_seqno());
     if block_id.seq_no() == 0 {
-        let handle = download_zerostate(engine, &block_id).await?;
+        let handle = download_zerostate(engine, block_id).await?;
         let zero_state = engine.load_state(handle.id()).await?;
         return Ok((handle, Some(zero_state), None));
     }
 
     // id should be key block if not it will never sync
     log::info!(target: "boot", "check if block proof is in database {}", block_id);
-    let handle = if let Some(handle) = engine.load_block_handle(&block_id)? {
+    let handle = if let Some(handle) = engine.load_block_handle(block_id)? {
         if handle.has_proof_link() || handle.has_proof() {
             let proof = match engine.load_block_proof(&handle, false).await {
                 Ok(proof) => proof,
@@ -75,11 +75,11 @@ async fn run_cold(
         }
 
         log::info!(target: "boot", "download init block proof {}", block_id);
-        match engine.download_block_proof(0, &block_id, false, true).await {
+        match engine.download_block_proof(0, block_id, false, true).await {
             Ok(proof) => match proof.check_proof_as_link() {
                 Ok(_) => {
                     log::info!(target: "boot", "block proof downloaded {}", block_id);
-                    let handle = engine.store_block_proof(0, &block_id, handle, &proof).await? 
+                    let handle = engine.store_block_proof(0, block_id, handle, &proof).await? 
                         .to_non_created()
                         .ok_or_else( 
                             || error!(
@@ -105,10 +105,10 @@ async fn run_cold(
         futures_timer::Delay::new(Duration::from_secs(1)).await;
 
         log::info!(target: "boot", "download init block proof link {}", block_id);
-        match engine.download_block_proof(0, &block_id, true, true).await {
+        match engine.download_block_proof(0, block_id, true, true).await {
             Ok(proof) => match proof.check_proof_link() {
                 Ok(_) => {
-                    let handle = engine.store_block_proof(0, &block_id, handle, &proof).await? 
+                    let handle = engine.store_block_proof(0, block_id, handle, &proof).await? 
                         .to_non_created()
                         .ok_or_else( 
                             || error!(
@@ -203,17 +203,21 @@ async fn get_key_blocks(
                 }
                 // we need to check presence and correctness of every hardfork
                 if let Some(hardfork_id) = hardfork {
-                    if hardfork_id.seq_no == block_id.seq_no {
-                        if hardfork_id == block_id {
-                            log::debug!(target: "boot", "hardfork {} found", block_id);
-                            hardfork = hardfork_iter.next();
-                        } else {
-                            log::warn!(target: "boot", "keyblock is {}, but must equal to hardfork {}", block_id, hardfork_id);
+                    match hardfork_id.seq_no.cmp(&block_id.seq_no) {
+                        std::cmp::Ordering::Equal => {
+                            if hardfork_id == block_id {
+                                log::debug!(target: "boot", "hardfork {} found", block_id);
+                                hardfork = hardfork_iter.next();
+                            } else {
+                                log::warn!(target: "boot", "keyblock is {}, but must equal to hardfork {}", block_id, hardfork_id);
+                                break
+                            }
+                        }
+                        std::cmp::Ordering::Less => {
+                            log::warn!(target: "boot", "keyblock is {}, but missed hardfork {}", block_id, hardfork_id);
                             break
                         }
-                    } else if hardfork_id.seq_no < block_id.seq_no {
-                        log::warn!(target: "boot", "keyblock is {}, but missed hardfork {}", block_id, hardfork_id);
-                        break
+                        std::cmp::Ordering::Greater => ()
                     }
                 }
                 //let prev_time = handle.gen_utime()?;
@@ -322,7 +326,7 @@ async fn download_start_blocks_and_states(
 
     engine.set_sync_status(Engine::SYNC_STATUS_LOAD_MASTER_STATE);
     let init_mc_state = download_state(
-        engine, &master_handle, master_handle.id(), active_peers, bad_peers, Some(RETRY_MASTER_STATE_DOWNLOAD)
+        engine, master_handle, master_handle.id(), active_peers, bad_peers, Some(RETRY_MASTER_STATE_DOWNLOAD)
     ).await?;
     CHECK!(master_handle.has_state());
     CHECK!(master_handle.is_applied());
@@ -342,12 +346,12 @@ async fn download_start_blocks_and_states(
             } else if engine.flags().starting_block_disabled {
                 let proof = engine.download_block_proof(0, block_id, true, false).await?;
                 log::info!(target: "boot", "shardchain block proof downloaded {}", block_id);
-                let handle = engine.store_block_proof(0, block_id, None, &proof).await?
+                
+                engine.store_block_proof(0, block_id, None, &proof).await?
                     .to_non_created()
                     .ok_or_else(
                         || error!("INTERNAL ERROR: Bad result in store block {} proof", block_id)
-                    )?;
-                handle
+                    )?
             } else {
                 let (block, proof) = engine.download_block(block_id, None).await?;
                 log::info!(target: "boot", "shardchain block and proof downloaded {}", block_id);
@@ -494,14 +498,14 @@ async fn download_state(
         let (block, _) = proof.virtualize_block()?;
         let state_update = block.read_state_update()?;
         let state = engine.download_and_store_state(
-            &handle, &state_update.new_hash, master_id, active_peers, bad_peers, attempts
+            handle, &state_update.new_hash, master_id, active_peers, bad_peers, attempts
         ).await?;
         engine.process_initial_state(&state).await?;
         state
     } else {
         engine.load_state(handle.id()).await?
     };
-    engine.set_applied(&handle, master_id.seq_no()).await?;
+    engine.set_applied(handle, master_id.seq_no()).await?;
     Ok(state)
 }
 
@@ -598,7 +602,7 @@ async fn check_hardforks(
     if hardfork_id.seq_no == 0 {
         fail!("hardfork block id wrong seq_no 0")
     }
-    let mc_state = engine.load_state(&last_applied_mc_block).await?;
+    let mc_state = engine.load_state(last_applied_mc_block).await?;
     if mc_state.seq_no() + 1 == hardfork_id.seq_no {
         log::info!(target: "boot", "previous block of hardfork is the last, just apply hardfork");
     } else if mc_state.seq_no() < hardfork_id.seq_no {

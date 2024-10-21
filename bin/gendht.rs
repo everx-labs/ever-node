@@ -18,10 +18,10 @@ use ever_block::{error, base64_encode, KeyOption, Result};
 
 async fn gen(ip: &str, dht_key_enc: &str) -> Result<()> {
     let config = AdnlNodeConfig::from_json(
-       adnl_node_test_config!(ip, adnl_node_test_key!(1 as usize, dht_key_enc))
+       adnl_node_test_config!(ip, adnl_node_test_key!(1_usize, dht_key_enc))
     ).unwrap();
     let adnl = AdnlNode::with_config(config).await.unwrap();
-    let dht = DhtNode::with_params(adnl.clone(), 1 as usize, None).unwrap();
+    let dht = DhtNode::with_params(adnl.clone(), 1_usize, None).unwrap();
     let node = dht.get_signed_node_of_network(None).unwrap();
     let key: Arc<dyn KeyOption> = (&node.id).try_into()?;
     let adr = AdnlNode::parse_address_list(&node.addr_list)?.ok_or_else(

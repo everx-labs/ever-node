@@ -99,10 +99,7 @@ impl ReceivedBlock for ReceivedBlockImpl {
     }
 
     fn is_initialized(&self) -> bool {
-        match self.state {
-            ReceivedBlockState::Initialized | ReceivedBlockState::Delivered => true,
-            _ => false,
-        }
+        matches!(self.state, ReceivedBlockState::Initialized | ReceivedBlockState::Delivered)
     }
 
     fn in_db(&self) -> bool {
@@ -148,15 +145,12 @@ impl ReceivedBlock for ReceivedBlockImpl {
     fn get_prev(&self) -> Option<ReceivedBlockPtr> {
         match &self.prev {
             None => None,
-            Some(prev) => Some(Rc::clone(&prev)),
+            Some(prev) => Some(Rc::clone(prev)),
         }
     }
 
     fn get_prev_hash(&self) -> Option<BlockHash> {
-        match self.get_prev() {
-            None => None,
-            Some(prev) => Some(prev.borrow().get_hash().clone()),
-        }
+        self.get_prev().map(|prev| prev.borrow().get_hash().clone())
     }
 
     fn get_next(&self) -> Option<ReceivedBlockPtr> {
@@ -195,7 +189,7 @@ impl ReceivedBlock for ReceivedBlockImpl {
         if self.get_height() == 0
             || self.get_state() == ReceivedBlockState::Ill
             || self.is_delivered()
-            || dep_hashes.len() == max_deps_count as usize
+            || dep_hashes.len() == max_deps_count
         {
             return;
         }
@@ -469,29 +463,25 @@ impl ReceivedBlock for ReceivedBlockImpl {
 
         let block_data = ton::BlockData {
             prev: self.get_prev().unwrap().borrow().export_tl_dep(),
-            deps: deps.into(),
+            deps,
         };
 
-        let block = ton::Block {
-            incarnation: self.incarnation.clone().into(),
+        ton::Block {
+            incarnation: self.incarnation.clone(),
             src: self.source_id as i32,
-            height: self.height as i32,
+            height: self.height,
             data: block_data,
             signature: self.signature.clone(),
-        };
-
-        block
+        }
     }
 
     fn export_tl_dep(&self) -> ton::BlockDep {
-        let dep = ton::BlockDep {
+        ton::BlockDep {
             src: self.source_id as i32,
-            data_hash: self.data_hash.clone().into(),
-            height: self.height as i32,
+            data_hash: self.data_hash.clone(),
+            height: self.height,
             signature: self.signature.clone(),
-        };
-
-        dep
+        }
     }
 
     /*
@@ -502,15 +492,15 @@ impl ReceivedBlock for ReceivedBlockImpl {
         let mut prev_hash: String = "NULL".to_owned();
 
         if let Some(prev_block) = &self.prev {
-            prev_hash = format!("{}", prev_block.borrow().get_hash().to_hex_string());
+            prev_hash = prev_block.borrow().get_hash().to_hex_string();
         }
 
-        let mut deps_string: String = "".to_owned();
+        let mut deps_string = String::new();
 
         for dep_iter in &self.block_deps {
             let dep = dep_iter.borrow();
 
-            if deps_string != "" {
+            if !deps_string.is_empty() {
                 deps_string += ", "
             }
 
@@ -555,16 +545,12 @@ impl ReceivedBlockImpl {
     */
 
     fn update_forks_dependency_heights(&mut self, block: &ReceivedBlockImpl) {
-        let actual_forks_dep_heights = &block.forks_dep_heights;
-
-        if actual_forks_dep_heights.len() > self.forks_dep_heights.len() {
-            self.forks_dep_heights
-                .resize(actual_forks_dep_heights.len(), 0);
-        }
-
-        for i in 0..actual_forks_dep_heights.len() {
-            if self.forks_dep_heights[i] < actual_forks_dep_heights[i] {
-                self.forks_dep_heights[i] = actual_forks_dep_heights[i];
+        let len = self.forks_dep_heights.len();
+        for (i, actual) in block.forks_dep_heights.iter().enumerate() {
+            if len <= i {
+                self.forks_dep_heights.push(*actual)
+            } else {
+                self.forks_dep_heights[i] = self.forks_dep_heights[i].max(*actual)
             }
         }
     }
@@ -603,11 +589,11 @@ impl ReceivedBlockImpl {
         if self.height == 1 {
             self.fork_id = source.borrow_mut().add_fork(receiver);
         } else {
-            assert!(!self.prev.is_none());
+            assert!(self.prev.is_some());
 
             let prev = self.prev.as_ref().unwrap();
 
-            if !prev.borrow().get_next().is_none() {
+            if prev.borrow().get_next().is_some() {
                 self.fork_id = source.borrow_mut().add_fork(receiver);
             } else {
                 get_mut_impl(&mut *prev.borrow_mut()).next = Some(self.self_cell.clone());
@@ -869,7 +855,7 @@ impl ReceivedBlockImpl {
                 fail!("Invalid source (first block) {}", block.src);
             }
 
-            if (&block.data_hash != receiver.get_incarnation()) || (block.signature.len() != 0) {
+            if (&block.data_hash != receiver.get_incarnation()) || (!block.signature.is_empty()) {
                 fail!("Invalid first block");
             }
         }
@@ -908,10 +894,8 @@ impl ReceivedBlockImpl {
             if prev_src != block.src as usize {
                 fail!("Invalid prev block source {}", block.data.prev.src);
             }
-        } else {
-            if prev_src != receiver.get_sources_count() {
-                fail!("Invalid prev(first) block source {}", block.data.prev.src);
-            }
+        } else if prev_src != receiver.get_sources_count() {
+            fail!("Invalid prev(first) block source {}", block.data.prev.src);
         }
 
         if block.data.prev.height + 1 != block.height {
@@ -942,7 +926,7 @@ impl ReceivedBlockImpl {
             (receiver.validate_block_dependency(dep))?;
         }
 
-        if payload.data().len() == 0 {
+        if payload.data().is_empty() {
             fail!("Empty payload");
         }
 
@@ -985,14 +969,14 @@ impl ReceivedBlockImpl {
         block.clone()
     }
 
-    pub fn create_from_string_dump(s: &String, receiver: &dyn Receiver) -> ReceivedBlockPtr {
+    pub fn create_from_string_dump(s: &str, receiver: &dyn Receiver) -> ReceivedBlockPtr {
         let mut body: ReceivedBlockImpl =
             ReceivedBlockImpl::new(receiver.get_received_blocks_instance_counter());
 
         for line in s.lines() {
             let v: Vec<&str> = line.split('=').collect();
             if v.len() == 2 {
-                let id = v.get(0).unwrap().trim();
+                let id = v.first().unwrap().trim();
                 let value = v.get(1).unwrap().trim();
 
                 if id == "height" {
@@ -1067,7 +1051,7 @@ impl ReceivedBlockImpl {
         let mut body: ReceivedBlockImpl =
             ReceivedBlockImpl::new(receiver.get_received_blocks_instance_counter());
         let block_id = utils::get_block_id(
-            &receiver.get_incarnation(),
+            receiver.get_incarnation(),
             receiver.get_source_public_key_hash(block.src as usize),
             block.height,
             payload.data(),

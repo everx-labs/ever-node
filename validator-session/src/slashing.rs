@@ -165,7 +165,7 @@ impl Debug for ValidatorStat {
 }
 
 /// Session statistics aggregated metric
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, num_derive::FromPrimitive)]
 #[repr(usize)]
 pub enum AggregatedMetric {
     /// Collations participation
@@ -376,10 +376,14 @@ impl AggregatedValidatorStat {
                     metric_norm.min_confidence_value
                 );
 
-                slashed_validators.push(SlashedNode {
-                    public_key: entry.public_key.clone(),
-                    metric_id: unsafe { ::std::mem::transmute(metric_id) },
-                });
+                if let Some(metric_id) = num_traits::FromPrimitive::from_usize(metric_id) {
+                    slashed_validators.push(SlashedNode {
+                        public_key: entry.public_key.clone(),
+                        metric_id,
+                    });
+                } else {
+                    log::error!("Failed to convert metric_id {} to AggregatedMetric", metric_id);
+                }
             }
         }
 

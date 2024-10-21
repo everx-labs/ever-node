@@ -28,7 +28,6 @@ const DOWNLOADING_BLOCK_TTL_SEC: usize = 300;
 pub const TPS_PERIOD_1: u64 = 5 * 60; // 5 min
 pub const TPS_PERIOD_2: u64 = 60; // 1 min
 
-
 pub struct FullNodeTelemetry {
     // Almost all metrics are zeroed while report creation
 
@@ -60,9 +59,8 @@ pub struct FullNodeTelemetry {
     sent_ext_msg_broadcasts: AtomicU64,
 }
 
-impl FullNodeTelemetry {
-
-    pub fn new() -> Self {
+impl Default for FullNodeTelemetry {
+    fn default() -> Self {
         Self {
             applied_blocks: AtomicU64::new(0),
             pre_applied_blocks: AtomicU64::new(0),
@@ -90,6 +88,9 @@ impl FullNodeTelemetry {
             sent_ext_msg_broadcasts: AtomicU64::new(0),
         }
     }
+}
+
+impl FullNodeTelemetry {
 
     pub fn new_applied_block(&self) {
         self.applied_blocks.fetch_add(1, Ordering::Relaxed);
@@ -201,9 +202,10 @@ impl FullNodeTelemetry {
         let block_broadcasts_unneeded = self.block_broadcasts_unneeded.swap(0, Ordering::Relaxed);
         let mut block_downloaded_attempts = [0_u64; MAX_DOWNLOAD_BLOCK_ATTEMPTS + 1];
         let mut block_downloaded_attempts_sum = 0;
-        for i in 0..MAX_DOWNLOAD_BLOCK_ATTEMPTS + 1 {
-            block_downloaded_attempts[i] = self.block_downloaded_attempts[i].swap(0, Ordering::Relaxed);
-            block_downloaded_attempts_sum += block_downloaded_attempts[i];
+        for (i, attempts) in self.block_downloaded_attempts.iter().enumerate() {
+            let count = attempts.swap(0, Ordering::Relaxed);
+            block_downloaded_attempts_sum += count;
+            block_downloaded_attempts[i] = count;
         }
         let block_download_times = self.block_download_times.swap(0, Ordering::Relaxed);
         let block_download_time_sum = self.block_download_time_sum.swap(0, Ordering::Relaxed);
@@ -287,13 +289,13 @@ impl FullNodeTelemetry {
         report.append(        "(block was already downloaded)\n");
         report.append(        "***\n");
         report.append(        "block download attempts:\n");
-        for i in 0..MAX_DOWNLOAD_BLOCK_ATTEMPTS + 1 {
+        for (i, attempts) in block_downloaded_attempts.iter().enumerate() {
             let i_str = format!("{:>4}", i + 1);
             report.append(format!(
                 "                      {}  {:>10} {:>3.0}%\n",
                 if i != MAX_DOWNLOAD_BLOCK_ATTEMPTS { &i_str } else { "more" },
-                block_downloaded_attempts[i],
-                if block_downloaded_attempts_sum > 0 { block_downloaded_attempts[i] as f64  / block_downloaded_attempts_sum as f64  * 100_f64 } else { 0_f64 }
+                attempts,
+                if block_downloaded_attempts_sum > 0 { *attempts as f64  / block_downloaded_attempts_sum as f64  * 100_f64 } else { 0_f64 }
             ));
         }
         report.append(        "***\n");

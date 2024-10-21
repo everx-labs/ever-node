@@ -28,7 +28,7 @@ pub use self::metrics::MetricsHandle;
 */
 
 pub fn bytes_to_string(v: &::ton_api::ton::bytes) -> String {
-    hex::encode(&v)
+    hex::encode(v)
 }
 
 pub fn public_key_hashes_to_string(v: &[PublicKeyHash]) -> String {
@@ -49,7 +49,7 @@ pub fn public_key_hashes_to_string(v: &[PublicKeyHash]) -> String {
 }
 
 pub fn time_to_string(time: &std::time::SystemTime) -> String {
-    let datetime: chrono::DateTime<chrono::offset::Utc> = time.clone().into();
+    let datetime: chrono::DateTime<chrono::offset::Utc> = (*time).into();
 
     datetime.format("%Y-%m-%d %T.%f").to_string()
 }
@@ -95,12 +95,12 @@ pub fn parse_hex_to_array(hex_asm: &str, dst: &mut [u8]) {
 }
 
 pub fn parse_hex_as_int256(hex_asm: &str) -> UInt256 {
-    let hex_bytes = parse_hex(&hex_asm);
+    let hex_bytes = parse_hex(hex_asm);
     UInt256::from_slice(hex_bytes.as_slice())
 }
 
 pub fn parse_hex_as_bytes(hex_asm: &str) -> ::ton_api::ton::bytes {
-    parse_hex(&hex_asm)
+    parse_hex(hex_asm)
 }
 
 pub fn parse_hex_as_block_payload(hex_asm: &str) -> BlockPayloadPtr {
@@ -153,11 +153,11 @@ pub fn parse_hex_as_expanded_private_key(hex_asm: &str) -> PrivateKey {
 }
 
 pub fn get_hash(data: &::ton_api::ton::bytes) -> BlockHash {
-    UInt256::calc_file_hash(&data)
+    UInt256::calc_file_hash(data)
 }
 
 pub fn get_hash_from_block_payload(data: &BlockPayloadPtr) -> BlockHash {
-    UInt256::calc_file_hash(&data.data())
+    UInt256::calc_file_hash(data.data())
 }
 
 pub fn int256_to_public_key_hash(public_key: &UInt256) -> PublicKeyHash {
@@ -175,7 +175,7 @@ pub fn public_key_hash_to_int256(v: &PublicKeyHash) -> UInt256 {
 pub fn get_overlay_id(first_block: &ton_api::ton::catchain::FirstBlock) -> Result<SessionId> {
     let serialized_first_block = serialize_tl_boxed_object!(first_block);
     let overlay_id = ::ton_api::ton::pub_::publickey::Overlay {
-        name: serialized_first_block.into(),
+        name: serialized_first_block,
     };
     let serialized_overlay_id = serialize_tl_boxed_object!(&overlay_id.into_boxed());
     Ok(UInt256::calc_file_hash(&serialized_overlay_id))
@@ -188,17 +188,17 @@ pub fn get_block_id(
     payload: &RawBuffer,
 ) -> ton::BlockId {
     ::ton_api::ton::catchain::block::id::Id {
-        incarnation: incarnation.clone().into(),
+        incarnation: incarnation.clone(),
         src: public_key_hash_to_int256(source_hash),
-        height: height,
-        data_hash: get_hash(payload).into(),
+        height,
+        data_hash: get_hash(payload),
     }
     .into_boxed()
 }
 
 pub fn get_block_dependency_id(block: &ton::BlockDep, receiver: &dyn Receiver) -> ton::BlockId {
     ::ton_api::ton::catchain::block::id::Id {
-        incarnation: receiver.get_incarnation().clone().into(),
+        incarnation: receiver.get_incarnation().clone(),
         src: public_key_hash_to_int256(receiver.get_source_public_key_hash(block.src as usize)),
         height: block.height,
         data_hash: block.data_hash.clone(),
@@ -208,10 +208,10 @@ pub fn get_block_dependency_id(block: &ton::BlockDep, receiver: &dyn Receiver) -
 
 pub fn get_root_block_id(incarnation: &SessionId) -> ton::BlockId {
     ::ton_api::ton::catchain::block::id::Id {
-        incarnation: incarnation.clone().into(),
-        src: incarnation.clone().into(),
+        incarnation: incarnation.clone(),
+        src: incarnation.clone(),
         height: 0,
-        data_hash: incarnation.clone().into(),
+        data_hash: incarnation.clone(),
     }
     .into_boxed()
 }
@@ -235,7 +235,7 @@ pub fn get_block_dependency_hash(block: &ton::BlockDep, receiver: &dyn Receiver)
 macro_rules! serialize_tl_bare_object
 {
   ($($args:expr),*) => {{
-    let mut ret : ton_api::ton::bytes = ton_api::ton::bytes::default();
+    let mut ret = ton_api::ton::bytes::default();
     let mut serializer = ton_api::Serializer::new(&mut ret.0);
 
     $(serializer.write_bare($args).unwrap();)*
@@ -248,7 +248,7 @@ macro_rules! serialize_tl_bare_object
 macro_rules! serialize_tl_boxed_object
 {
   ($($args:expr),*) => {{
-    let mut ret : ton_api::ton::bytes = ton_api::ton::bytes::default();
+    let mut ret = ton_api::ton::bytes::default();
     let mut serializer = ton_api::Serializer::new(&mut ret);
 
     $(serializer.write_boxed($args).unwrap();)*
@@ -288,15 +288,13 @@ where
 }
 
 pub fn deserialize_tl_bare_object<T: ::ton_api::BareDeserialize>(bytes: &RawBuffer) -> Result<T> {
-    let cloned_bytes = bytes.clone();
-    let data: &mut &[u8] = &mut cloned_bytes.as_slice();
-    ton_api::Deserializer::new(data).read_bare()
+    let mut cursor = std::io::Cursor::new(bytes);
+    ton_api::Deserializer::new(&mut cursor).read_bare()
 }
 
 pub fn deserialize_tl_boxed_object<T: ::ton_api::BoxedDeserialize>(bytes: &RawBuffer) -> Result<T> {
-    let cloned_bytes = bytes.clone();
-    let data: &mut &[u8] = &mut cloned_bytes.as_slice();
-    ton_api::Deserializer::new(data).read_boxed()
+    let mut cursor = std::io::Cursor::new(bytes);
+    ton_api::Deserializer::new(&mut cursor).read_boxed()
 }
 
 /*
@@ -317,12 +315,19 @@ pub struct Metric {
     usage: MetricUsage,
 }
 
+type MetricsTree = Box<dyn Fn(&str, &BTreeMap<String, Metric>) -> Option<Metric>>;
+
 pub struct MetricsDumper {
     prev_metrics: BTreeMap<String, Metric>,
-    compute_handlers:
-        HashMap<String, Box<dyn Fn(&String, &BTreeMap<String, Metric>) -> Option<Metric>>>,
+    compute_handlers: HashMap<String, MetricsTree>,
     derivative_metrics: HashSet<String>,
     last_dump_time: std::time::SystemTime,
+}
+
+impl Default for MetricsDumper {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MetricsDumper {
@@ -330,16 +335,16 @@ impl MetricsDumper {
     pub const METRIC_FLOAT_MULTIPLIER: f64 = 10000.0;
     pub const METRIC_TIME_MULTIPLIER: f64 = 1000.0;
 
-    pub fn add_compute_handler<F>(&mut self, key: String, handler: F)
+    pub fn add_compute_handler<F>(&mut self, key: impl ToString, handler: F)
     where
-        F: Fn(&String, &BTreeMap<String, Metric>) -> Option<Metric>,
+        F: Fn(&str, &BTreeMap<String, Metric>) -> Option<Metric>,
         F: 'static,
     {
-        self.compute_handlers.insert(key, Box::new(handler));
+        self.compute_handlers.insert(key.to_string(), Box::new(handler));
     }
 
-    pub fn add_derivative_metric(&mut self, key: String) {
-        self.derivative_metrics.insert(key);
+    pub fn add_derivative_metric(&mut self, key: impl ToString) {
+        self.derivative_metrics.insert(key.to_string());
     }
 
     fn update_histogram(
@@ -348,7 +353,7 @@ impl MetricsDumper {
         mut basic_key: String,
         mut values: Vec<u64>,
     ) {
-        let (mut last, mut avg, mut med, mut min, mut max) = if values.len() > 0 {
+        let (mut last, mut avg, mut med, mut min, mut max) = if !values.is_empty() {
             let last = values[values.len() - 1] as f64;
             let avg = values.iter().sum::<u64>() as f64 / values.len() as f64;
 
@@ -379,35 +384,35 @@ impl MetricsDumper {
             format!("{}.last", basic_key),
             Metric {
                 value: (last * Self::METRIC_FLOAT_MULTIPLIER) as u64,
-                usage: usage,
+                usage,
             },
         );
         metrics.insert(
             format!("{}.avg", basic_key),
             Metric {
                 value: (avg * Self::METRIC_FLOAT_MULTIPLIER) as u64,
-                usage: usage,
+                usage,
             },
         );
         metrics.insert(
             format!("{}.med", basic_key),
             Metric {
                 value: (med * Self::METRIC_FLOAT_MULTIPLIER) as u64,
-                usage: usage,
+                usage,
             },
         );
         metrics.insert(
             format!("{}.min", basic_key),
             Metric {
                 value: (min * Self::METRIC_FLOAT_MULTIPLIER) as u64,
-                usage: usage,
+                usage,
             },
         );
         metrics.insert(
             format!("{}.max", basic_key),
             Metric {
                 value: (max * Self::METRIC_FLOAT_MULTIPLIER) as u64,
-                usage: usage,
+                usage,
             },
         );
         metrics.insert(
@@ -439,11 +444,9 @@ impl MetricsDumper {
             if let Some(stripped_basic_key) = key.strip_prefix("percents:") {
                 usage = MetricUsage::Percents;
                 key = stripped_basic_key.to_string();
-            } else {
-                if let Some(stripped_basic_key) = key.strip_prefix("float:") {
-                    key = stripped_basic_key.to_string();
-                    usage = MetricUsage::Float;
-                }
+            } else if let Some(stripped_basic_key) = key.strip_prefix("float:") {
+                key = stripped_basic_key.to_string();
+                usage = MetricUsage::Float;
             }
             metrics.insert(key, Metric {
                 value: v as u64,
@@ -577,8 +580,8 @@ impl MetricsDumper {
 
 fn get_metrics_counters_pair(
     metrics: &BTreeMap<String, Metric>,
-    key1: &String,
-    key2: &String,
+    key1: &str,
+    key2: &str,
 ) -> Option<(u64, u64)> {
     let value1 = metrics.get(key1);
     let value1 = match value1 {
@@ -592,27 +595,21 @@ fn get_metrics_counters_pair(
         _ => return None,
     };
 
-    if !match value1.usage {
-        MetricUsage::Counter => true,
-        _ => false,
-    } || !match value2.usage {
-        MetricUsage::Counter => true,
-        _ => false,
-    } {
-        return None;
+    if matches!(value1.usage, MetricUsage::Counter) && matches!(value2.usage, MetricUsage::Counter) {
+        Some((value1.value, value2.value))
+    } else {
+        None
     }
-
-    Some((value1.value, value2.value))
 }
 
 pub fn compute_diff_counter(
-    basic_key: &String,
+    basic_key: &str,
     metrics: &BTreeMap<String, Metric>,
     add_suffix: &str,
     sub_suffix: &str,
 ) -> Option<Metric> {
-    let create_key = basic_key.clone() + add_suffix;
-    let drop_key = basic_key.clone() + sub_suffix;
+    let create_key = basic_key.to_string() + add_suffix;
+    let drop_key = basic_key.to_string() + sub_suffix;
 
     if let Some((create_value, drop_value)) =
         get_metrics_counters_pair(metrics, &create_key, &drop_key)
@@ -636,14 +633,14 @@ pub fn compute_diff_counter(
 }
 
 pub fn compute_instance_counter(
-    basic_key: &String,
+    basic_key: &str,
     metrics: &BTreeMap<String, Metric>,
 ) -> Option<Metric> {
     compute_diff_counter(basic_key, metrics, ".create", ".drop")
 }
 
 pub fn compute_queue_size_counter(
-    basic_key: &String,
+    basic_key: &str,
     metrics: &BTreeMap<String, Metric>,
 ) -> Option<Metric> {
     compute_diff_counter(basic_key, metrics, ".posts", ".pulls")
@@ -651,9 +648,9 @@ pub fn compute_queue_size_counter(
 
 pub fn add_compute_percentage_metric(
     metrics_dumper: &mut MetricsDumper,
-    key: &String,
-    value_key: &String,
-    total_key: &String,
+    key: &str,
+    value_key: &str,
+    total_key: &str,
     bias: f64,
 ) {
     add_compute_relative_metric_impl(
@@ -668,9 +665,9 @@ pub fn add_compute_percentage_metric(
 
 pub fn add_compute_relative_metric(
     metrics_dumper: &mut MetricsDumper,
-    key: &String,
-    value_key: &String,
-    total_key: &String,
+    key: &str,
+    value_key: impl ToString,
+    total_key: impl ToString,
     bias: f64,
 ) {
     add_compute_relative_metric_impl(
@@ -685,14 +682,14 @@ pub fn add_compute_relative_metric(
 
 fn add_compute_relative_metric_impl(
     metrics_dumper: &mut MetricsDumper,
-    key: &String,
-    value_key: &String,
-    total_key: &String,
+    key: &str,
+    value_key: impl ToString,
+    total_key: impl ToString,
     bias: f64,
     usage: MetricUsage,
 ) {
-    let value_key = value_key.clone();
-    let total_key = total_key.clone();
+    let value_key = value_key.to_string();
+    let total_key = total_key.to_string();
     metrics_dumper.add_compute_handler(key.to_string(), move |_key, metrics| -> Option<Metric> {
         if let Some((value, total_value)) =
             get_metrics_counters_pair(metrics, &value_key, &total_key)
@@ -702,7 +699,7 @@ fn add_compute_relative_metric_impl(
 
                 return Some(Metric {
                     value: (percentage * MetricsDumper::METRIC_FLOAT_MULTIPLIER) as u64,
-                    usage: usage,
+                    usage,
                 });
             }
         }
@@ -711,23 +708,23 @@ fn add_compute_relative_metric_impl(
     });
 }
 
-pub fn add_compute_result_metric(metrics_dumper: &mut MetricsDumper, basic_key: &String) {
+pub fn add_compute_result_metric(metrics_dumper: &mut MetricsDumper, basic_key: &str) {
     metrics_dumper.add_compute_handler(
         format!("{}.success.frequency", basic_key),
-        &utils::compute_result_success_metric,
+        utils::compute_result_success_metric,
     );
     metrics_dumper.add_compute_handler(
         format!("{}.failure.frequency", basic_key),
-        &utils::compute_result_failure_metric,
+        utils::compute_result_failure_metric,
     );
     metrics_dumper.add_compute_handler(
         format!("{}.ignore.frequency", basic_key),
-        &utils::compute_result_ignore_metric,
+        utils::compute_result_ignore_metric,
     );
 }
 
 pub fn compute_result_status_metric(
-    basic_key: &String,
+    basic_key: &str,
     success: bool,
     metrics: &BTreeMap<String, Metric>,
 ) -> Option<Metric> {
@@ -753,21 +750,21 @@ pub fn compute_result_status_metric(
 }
 
 pub fn compute_result_success_metric(
-    basic_key: &String,
+    basic_key: &str,
     metrics: &BTreeMap<String, Metric>,
 ) -> Option<Metric> {
     compute_result_status_metric(basic_key, true, metrics)
 }
 
 pub fn compute_result_failure_metric(
-    basic_key: &String,
+    basic_key: &str,
     metrics: &BTreeMap<String, Metric>,
 ) -> Option<Metric> {
     compute_result_status_metric(basic_key, false, metrics)
 }
 
 pub fn compute_result_ignore_metric(
-    basic_key: &String,
+    basic_key: &str,
     metrics: &BTreeMap<String, Metric>,
 ) -> Option<Metric> {
     let basic_key = basic_key.trim_end_matches(".ignore.frequency").to_string();

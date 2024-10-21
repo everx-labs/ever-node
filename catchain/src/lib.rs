@@ -10,6 +10,7 @@
 * See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
+#![allow(clippy::too_many_arguments)]
 
 /// Modules
 mod activity_node;
@@ -425,7 +426,7 @@ pub trait ReceiverSource {
     fn get_forks_count(&self) -> usize;
 
     /// Get list of forks
-    fn get_forks(&self) -> &Vec<usize>;
+    fn get_forks(&self) -> &[usize];
 
     /// Add new fork for this validator
     fn add_fork(&mut self, receiver: &mut dyn Receiver) -> usize;
@@ -518,9 +519,9 @@ pub trait Receiver {
     fn create_block(&mut self, block: &ton::BlockDep) -> ReceivedBlockPtr;
 
     /// Create new block from a string dump
-    fn create_block_from_string_dump(&self, dump: &String) -> ReceivedBlockPtr;
+    fn create_block_from_string_dump(&self, dump: &str) -> ReceivedBlockPtr;
 
-    fn parse_add_received_block(&mut self, s: &String);
+    fn parse_add_received_block(&mut self, s: &str);
 
     /// Adding new block
     fn add_block(&mut self, payload: BlockPayloadPtr, deps: Vec<BlockHash>);
@@ -736,7 +737,7 @@ pub trait CatchainOverlayManager {
         &self,
         local_id: &PublicKeyHash,
         overlay_short_id: &Arc<PrivateOverlayShortId>,
-        nodes: &Vec<CatchainNode>,
+        nodes: &[CatchainNode],
         overlay_listener: CatchainOverlayListenerPtr,
         log_replay_listener: CatchainOverlayLogReplayListenerPtr,
     ) -> Result<CatchainOverlayPtr>;
@@ -826,10 +827,12 @@ pub trait ReceiverListener {
     fn get_task_queue(&self) -> &ReceiverTaskQueuePtr;
 }
 
+pub type PostCallback = Box<dyn FnOnce(&mut dyn Receiver) + Send>;
+
 /// Tasks queue for receiver
 pub trait ReceiverTaskQueue: Send + Sync {
     /// Task execution
-    fn post_closure(&self, handler: Box<dyn FnOnce(&mut dyn Receiver) + Send>);
+    fn post_closure(&self, handler: PostCallback);
 
     /// Utility task execution
     fn post_utility_closure(&self, handler: Box<dyn FnOnce() + Send>);
@@ -907,7 +910,7 @@ pub trait LogPlayer {
     fn get_local_key(&self) -> &PrivateKey;
 
     /// Get list of nodes
-    fn get_nodes(&self) -> &Vec<CatchainNode>;
+    fn get_nodes(&self) -> &[CatchainNode];
 
     /// Get weights
     fn get_weights(&self) -> &Vec<ValidatorWeight>;
@@ -959,7 +962,7 @@ impl CatchainFactory {
 
     /// Create new received block from string dump
     pub fn create_received_block_from_string_dump(
-        dump: &String,
+        dump: &str,
         receiver: &dyn Receiver,
     ) -> ReceivedBlockPtr {
         received_block::ReceivedBlockImpl::create_from_string_dump(dump, receiver)
@@ -1028,7 +1031,7 @@ impl CatchainFactory {
     pub fn create_receiver(
         listener: ReceiverListenerPtr,
         incarnation: &SessionId,
-        ids: &Vec<CatchainNode>,
+        ids: &[CatchainNode],
         local_key: &PrivateKey,
         path: String,
         db_suffix: String,
@@ -1065,7 +1068,7 @@ impl CatchainFactory {
     pub fn create_catchain(
         options: &Options,
         session_id: &SessionId,
-        ids: &Vec<CatchainNode>,
+        ids: Vec<CatchainNode>,
         local_key: &PrivateKey,
         path: String,
         db_suffix: String,

@@ -135,7 +135,7 @@ fn unzip_folder(zip_path: &str, target_path: &str) -> Result<()> {
         } else {
             if let Some(p) = outpath.parent() {
                 if !p.exists() {
-                    std::fs::create_dir_all(&p)?;
+                    std::fs::create_dir_all(p)?;
                 }
             }
             let mut outfile = File::create(&outpath)?;

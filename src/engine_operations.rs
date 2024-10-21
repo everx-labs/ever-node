@@ -14,7 +14,7 @@
 use crate::{
     block::{BlockKind, BlockStuff}, 
     block_proof::BlockProofStuff, config::{CollatorConfig, CollatorTestBundlesGeneralConfig},
-    engine::{Engine, EngineFlags}, 
+    engine::{Engine, EngineFlags, SplitQueues},
     engine_traits::{
         EngineAlloc, EngineOperations, PrivateOverlayOperations, RempCoreInterface, 
         RempDuplicateStatus, Server
@@ -76,9 +76,7 @@ impl EngineOperations for Engine {
     async fn is_foreign_wc(&self, workchain_id: i32) -> Result<(bool, i32)> {
         let cap_workchains = self.load_actual_config_params().await?.has_capability(GlobalCapabilities::CapWorkchains);
         if let Some(own_workchain_id) = self.processed_workchain() {
-            if !cap_workchains {
-                Ok((false, own_workchain_id))
-            } else if workchain_id == MASTERCHAIN_ID {
+            if !cap_workchains || workchain_id == MASTERCHAIN_ID {
                 Ok((false, own_workchain_id)) // masterchain is always no foreign
             } else {
                 Ok((own_workchain_id != workchain_id, own_workchain_id))
@@ -102,7 +100,7 @@ impl EngineOperations for Engine {
     async fn set_validator_list(
         &self, 
         validator_list_id: UInt256,
-        validators: &Vec<CatchainNode>
+        validators: &[CatchainNode]
     ) -> Result<Option<Arc<dyn KeyOption>>> {
         self.validator_network().set_validator_list(validator_list_id, validators).await
     }
@@ -167,7 +165,7 @@ impl EngineOperations for Engine {
         &self,
         validator_list_id: UInt256,
         overlay_short_id : &Arc<PrivateOverlayShortId>,
-        nodes_public_keys : &Vec<CatchainNode>,
+        nodes_public_keys : &[CatchainNode],
         listener : CatchainOverlayListenerPtr,
         _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
         broadcast_hops: Option<usize>,
@@ -241,12 +239,10 @@ impl EngineOperations for Engine {
             if prev_handle.has_next1() {
                 let id = self.load_block_next1(prev_handle.id())?;
                 break self.wait_applied_block(&id, timeout_ms).await?;
-            } else {
-                if let Some(id) = self.next_block_applying_awaiters()
-                    .wait(prev_handle.id(), timeout_ms, || Ok(prev_handle.has_next1())).await? {
-                    if let Some(handle) = self.load_block_handle(&id)? {
-                        break handle;
-                    }
+            } else if let Some(id) = self.next_block_applying_awaiters()
+                .wait(prev_handle.id(), timeout_ms, || Ok(prev_handle.has_next1())).await? {
+                if let Some(handle) = self.load_block_handle(&id)? {
+                    break handle;
                 }
             }
         };
@@ -412,14 +408,12 @@ impl EngineOperations for Engine {
                 ).await? {
                     return Ok((queue_update, None))
                 }
-            } else {
-                if let Some((block, proof)) = self.download_block_awaiters().do_or_wait(
-                    id,
-                    None,
-                    self.download_block_worker(id, limit, None)
-                ).await? {
-                    return Ok((block, Some(proof)))
-                }
+            } else if let Some((block, proof)) = self.download_block_awaiters().do_or_wait(
+                id,
+                None,
+                self.download_block_worker(id, limit, None)
+            ).await? {
+                return Ok((block, Some(proof)))
             }
         }
     }
@@ -756,7 +750,7 @@ impl EngineOperations for Engine {
     #[cfg(feature = "external_db")]
     async fn process_shard_hashes_in_ext_db(
         &self,
-        shard_hashes: &Vec<BlockIdExt>)
+        shard_hashes: &[BlockIdExt])
     -> Result<()> {
         for db in self.ext_db() {
             db.process_shard_hashes(shard_hashes).await?;
@@ -1067,7 +1061,7 @@ impl EngineOperations for Engine {
             message: data,
             id: id.clone(),
             timestamp: 0,
-            signature: Vec::new().into()
+            signature: Vec::new()
         }.into_boxed();
         let zero_source = Arc::new(KeyId::from_data([0; 32]));
         self.network().remp().messages_subscriber()?.new_remp_message(
@@ -1236,7 +1230,7 @@ impl EngineOperations for Engine {
     async fn send_remp_receipt(&self, to: Arc<KeyId>, receipt: RempReceipt) -> Result<()> {
         let validators: Vec<CatchainNode> = self.load_actual_config_params().await?
             .validator_set()?.list()
-            .iter().map(|vd| validatordescr_to_catchain_node(vd)).collect();
+            .iter().map(validatordescr_to_catchain_node).collect();
         let (key, adnl_id) = self.network
             .get_validator_key(&validators).await?
             .ok_or_else(|| error!("Can't get validator's key"))?;
@@ -1264,11 +1258,11 @@ impl EngineOperations for Engine {
 
         log::info!("Validators resolving for remp was started");
 
-        if to_resolve.len() > 0 {
+        if !to_resolve.is_empty() {
             // TODO support callback and breaker flag
             self.network().search_validator_keys_for_full_node(to_resolve, Arc::new(|_| {}))?;
         }
-        if to_delete.len() > 0 {
+        if !to_delete.is_empty() {
             self.network().delete_validator_keys_for_full_node(to_delete)?;
         }
 
@@ -1314,10 +1308,7 @@ impl EngineOperations for Engine {
         );
     }
 
-    fn get_split_queues(
-        &self,
-        before_split_block: &BlockIdExt
-    ) -> Option<(OutMsgQueue, OutMsgQueue, HashSet<UInt256>)> {
+    fn get_split_queues(&self, before_split_block: &BlockIdExt) -> SplitQueues {
         if let Some(guard) = self.split_queues_cache().get(before_split_block) {
             if let Some(q) = guard.val() {
                 return Some(q.clone())
@@ -1363,7 +1354,7 @@ impl EngineOperations for Engine {
     async fn download_mesh_kit(&self, nw_id: i32, id: &BlockIdExt) -> Result<(BlockStuff, BlockProofStuff)> {
         loop {
             if let Some((block, proof)) = self.download_mesh_kit_awaiters().do_or_wait(
-                &id,
+                id,
                 None,
                 self.download_mesh_kit_worker(nw_id, id, Some(10), None)
             ).await? {
@@ -1420,6 +1411,8 @@ async fn redirect_external_message(
         ).await;
         #[cfg(feature = "telemetry")]
         engine.full_node_telemetry().sent_ext_msg_broadcast();
+        #[cfg(feature = "tracing")]
+        crate::jaeger::broadcast_sended(id.to_hex_string());
         res
     } else {
         fail!("External message is not properly formatted: {}", message)

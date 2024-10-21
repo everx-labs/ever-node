@@ -102,10 +102,7 @@ impl SessionState for SessionStateImpl {
         _desc: &dyn SessionDescription,
         block_id: &BlockId,
     ) -> Option<SentBlockPtr> {
-        match self.current_round.get_block(block_id) {
-            None => None,
-            Some(block_candidate) => Some(block_candidate.get_block().clone()),
-        }
+        self.current_round.get_block(block_id).map(|block_candidate| block_candidate.get_block().clone())
     }
 
     fn check_block_is_sent_by(&self, src_idx: u32) -> bool {
@@ -349,7 +346,7 @@ impl SessionState for SessionStateImpl {
                     SessionFactory::create_round(desc, new_current_round.get_sequence_number() + 1);
             }
 
-            return Self::create(desc, new_attempt_ids, new_current_round, new_old_rounds);
+            Self::create(desc, new_attempt_ids, new_current_round, new_old_rounds)
         } else {
             //change state of one of the old rounds
 
@@ -363,12 +360,12 @@ impl SessionState for SessionStateImpl {
                 .old_rounds
                 .change(desc, round_id as usize, new_old_round);
 
-            return Self::create(
+            Self::create(
                 desc,
                 new_attempt_ids,
                 self.current_round.clone(),
                 new_old_rounds,
-            );
+            )
         }
     }
 
@@ -474,22 +471,24 @@ impl Merge<PoolPtr<dyn SessionState>> for PoolPtr<dyn SessionState> {
 
             //choose round with highest sequence number and merge opposite round to old rounds
 
-            if left_sequence_number < right_sequence_number {
-                let old_round = old_rounds.at(left_sequence_number as usize);
-                let old_round = old_round.merge_round(&*left.current_round, desc);
+            match left_sequence_number.cmp(&right_sequence_number) {
+                std::cmp::Ordering::Less => {
+                    let old_round = old_rounds.at(left_sequence_number as usize);
+                    let old_round = old_round.merge_round(&*left.current_round, desc);
 
-                old_rounds = old_rounds.change(desc, left_sequence_number as usize, old_round);
+                    old_rounds = old_rounds.change(desc, left_sequence_number as usize, old_round);
 
-                right.current_round.clone()
-            } else if left_sequence_number > right_sequence_number {
-                let old_round = old_rounds.at(right_sequence_number as usize);
-                let old_round = old_round.merge_round(&*right.current_round, desc);
+                    right.current_round.clone()
+                }
+                std::cmp::Ordering::Greater => {
+                    let old_round = old_rounds.at(right_sequence_number as usize);
+                    let old_round = old_round.merge_round(&*right.current_round, desc);
 
-                old_rounds = old_rounds.change(desc, right_sequence_number as usize, old_round);
+                    old_rounds = old_rounds.change(desc, right_sequence_number as usize, old_round);
 
-                left.current_round.clone()
-            } else {
-                left.current_round.merge(&right.current_round, desc)
+                    left.current_round.clone()
+                }
+                std::cmp::Ordering::Equal => left.current_round.merge(&right.current_round, desc)
             }
         };
 
@@ -574,9 +573,9 @@ impl std::cmp::PartialEq for dyn SessionState {
 impl CacheObject<SessionStateImpl> for SessionStateImpl {
     fn compare(&self, value: &Self) -> bool {
         self.hash == value.hash
-            && &self.attempt_ids == &value.attempt_ids
-            && &self.current_round == &value.current_round
-            && &self.old_rounds == &value.old_rounds
+            && self.attempt_ids.eq(&value.attempt_ids)
+            && self.current_round.eq(&value.current_round)
+            && self.old_rounds == value.old_rounds
     }
 }
 
@@ -723,10 +722,10 @@ impl SessionStateImpl {
     ) -> Self {
         Self {
             pool: SessionPool::Temp,
-            attempt_ids: attempt_ids,
-            old_rounds: old_rounds,
-            current_round: current_round,
-            hash: hash,
+            attempt_ids,
+            old_rounds,
+            current_round,
+            hash,
             instance_counter: instance_counter.clone(),
         }
     }

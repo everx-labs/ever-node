@@ -26,24 +26,22 @@ use std::fmt;
 ===================================================================================================
 */
 
-fn compute_hash<T>(data: &Vec<T>) -> HashType
+fn compute_hash<T>(data: &[T]) -> HashType
 where
     T: HashableObject,
 {
     let hashes: Vec<ton::int> = data.iter().map(|x| x.get_ton_hash()).collect();
 
     crate::utils::compute_hash(ton::hashable::Vector {
-        value: hashes.into(),
+        value: hashes,
     })
 }
 
-fn compute_vector_hash<T>(data: &Vec<T>) -> HashType
+fn compute_vector_hash<T>(data: &[T]) -> HashType
 where
     T: HashableObject + 'static,
 {
-    let obj: &dyn std::any::Any = data;
-
-    if let Some(ref _data) = obj.downcast_ref::<Vec<bool>>() {
+    if std::any::TypeId::of::<T>() == std::any::TypeId::of::<bool>() {
         unreachable!();
     } else {
         crate::utils::compute_hash(ton::hashable::CntVector {
@@ -52,7 +50,7 @@ where
     }
 }
 
-fn compute_sorted_vector_hash<T>(data: &Vec<T>) -> HashType
+fn compute_sorted_vector_hash<T>(data: &[T]) -> HashType
 where
     T: HashableObject,
 {
@@ -61,7 +59,7 @@ where
     })
 }
 
-fn compare<T>(left: &Vec<T>, right: &Vec<T>) -> bool
+fn compare<T>(left: &[T], right: &[T]) -> bool
 where
     T: std::cmp::PartialEq,
 {
@@ -69,7 +67,7 @@ where
         return false;
     }
 
-    for i in 0..left.len() as usize {
+    for i in 0..left.len() {
         if left[i] != right[i] {
             return false;
         }
@@ -126,6 +124,10 @@ where
         self.data.len()
     }
 
+    fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     fn at(&self, index: usize) -> &T {
         assert!(index <= self.data.len());
 
@@ -174,7 +176,7 @@ where
     fn modify(
         &self,
         desc: &mut dyn SessionDescription,
-        modifier: &Box<dyn Fn(&T) -> T>,
+        modifier: &dyn Fn(&T) -> T,
     ) -> PoolPtr<dyn Vector<T>> {
         instrument!();
 
@@ -232,6 +234,13 @@ where
         }
     }
 
+    fn is_empty(&self) -> bool {
+        match self {
+            Some(vec) => vec.is_empty(),
+            _ => true,
+        }
+    }
+
     fn at(&self, index: usize) -> &T {
         self.as_ref().unwrap().at(index)
     }
@@ -243,7 +252,7 @@ where
     fn iter(&self) -> std::slice::Iter<T> {
         match &self {
             Some(ref src) => src.iter(),
-            _ => (&[]).iter(),
+            _ => [].iter(),
         }
     }
 
@@ -277,7 +286,7 @@ where
     fn modify(
         &self,
         desc: &mut dyn SessionDescription,
-        modifier: &Box<dyn Fn(&T) -> T>,
+        modifier: &dyn Fn(&T) -> T,
     ) -> Option<PoolPtr<dyn Vector<T>>> {
         instrument!();
 
@@ -534,7 +543,7 @@ where
         desc: &mut dyn SessionDescription,
         data: Vec<T>,
     ) -> Option<PoolPtr<dyn Vector<T>>> {
-        if data.len() == 0 {
+        if data.is_empty() {
             return None;
         }
 
@@ -591,6 +600,10 @@ where
         self.data.len()
     }
 
+    fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     fn at(&self, index: usize) -> &T {
         assert!(index <= self.data.len());
 
@@ -642,7 +655,14 @@ where
     fn len(&self) -> usize {
         match self {
             Some(vec) => vec.len(),
-            _ => 0,
+            None => 0
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Some(vec) => vec.is_empty(),
+            None => true
         }
     }
 
@@ -657,7 +677,7 @@ where
     fn iter(&self) -> std::slice::Iter<T> {
         match &self {
             Some(ref src) => src.iter(),
-            _ => (&[]).iter(),
+            _ => [].iter(),
         }
     }
 
@@ -683,9 +703,9 @@ where
                     let middle = (right + left) as usize / 2;
                     let middle_value = &data[middle];
 
-                    if Compare::less(&middle_value, &value) {
+                    if Compare::less(middle_value, &value) {
                         left = middle as i32;
-                    } else if Compare::less(&value, &middle_value) {
+                    } else if Compare::less(&value, middle_value) {
                         right = middle as i32;
                     } else {
                         if middle_value == &value {
@@ -697,7 +717,7 @@ where
                             T::get_vector_instance_counter(desc),
                         );
 
-                        result.data.extend_from_slice(&data);
+                        result.data.extend_from_slice(data);
 
                         result.data[middle] = value;
 
@@ -851,7 +871,7 @@ where
                     left_index += 1;
                     right_index += 1;
 
-                    items.push(merge_fn(&left_item, &right_item, desc));
+                    items.push(merge_fn(left_item, right_item, desc));
                 }
             }
         }

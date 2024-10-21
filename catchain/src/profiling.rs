@@ -26,24 +26,20 @@ pub struct InstanceCounter {
 }
 
 impl InstanceCounter {
-    pub fn new(receiver: &MetricsHandle, key: &String) -> Self {
-        let body = Self {
+    pub fn new(receiver: &MetricsHandle, key: &str) -> Self {
+        Self {
             create_counter: receiver.sink().register_counter(&format!("{}.create", &key).into()),
             drop_counter: receiver.sink().register_counter(&format!("{}.drop", &key).into()),
             need_drop: false,
-        };
-
-        body
+        }
     }
 
     pub fn clone_refs_only(&self) -> Self {
-        let body = Self {
+        Self {
             create_counter: self.create_counter.clone(),
             drop_counter: self.drop_counter.clone(),
             need_drop: false,
-        };
-
-        body
+        }
     }
 
     pub fn force_drop(&mut self) {
@@ -83,14 +79,12 @@ pub struct ResultStatusCounter {
 }
 
 impl ResultStatusCounter {
-    pub fn new(receiver: &MetricsHandle, key: &String) -> Self {
-        let body = Self {
+    pub fn new(receiver: &MetricsHandle, key: &str) -> Self {
+        Self {
             total_counter: receiver.sink().register_counter(&format!("{}.total", &key).into()),
             success_counter: receiver.sink().register_counter(&format!("{}.success", &key).into()),
             failure_counter: receiver.sink().register_counter(&format!("{}.failure", &key).into()),
-        };
-
-        body
+        }
     }
 
     pub fn total_increment(&self) {
@@ -128,6 +122,7 @@ struct ProfilerSpan {
 }
 
 /// Profiler
+#[derive(Clone)]
 pub struct Profiler {
     spans: Vec<ProfilerSpan>, //array of spans for the profiler
     current_span: usize,      //index of current span in a callstack
@@ -189,13 +184,12 @@ impl Profiler {
 
     /// Span accessing / creation (returns index of span)
     fn get_span(&mut self, code_line: &'static ProfileCodeLine) -> usize {
-        let parent = &self.spans[self.current_span as usize];
+        let parent = &self.spans[self.current_span];
         let mut span_index = parent.first;
         let mut last_span_index = -1;
 
         while span_index != -1 {
-            if (self.spans[span_index as usize].code_line as *const ProfileCodeLine)
-                == (code_line as *const ProfileCodeLine)
+            if std::ptr::eq(self.spans[span_index as usize].code_line, code_line)
             {
                 return span_index as usize;
             }
@@ -208,7 +202,7 @@ impl Profiler {
             parent: self.current_span as i64,
             next: -1,
             first: -1,
-            code_line: code_line,
+            code_line,
             duration: 0,
         });
 
@@ -218,7 +212,7 @@ impl Profiler {
             assert!(self.spans[last_span_index as usize].next == -1);
             self.spans[last_span_index as usize].next = new_span_index;
         } else {
-            let parent = &mut self.spans[self.current_span as usize];
+            let parent = &mut self.spans[self.current_span];
 
             assert!(parent.first == -1);
 
@@ -266,8 +260,7 @@ impl Profiler {
         let dst_span = &mut self.spans[dst_span_index];
 
         assert!(
-            (src_span.code_line as *const ProfileCodeLine)
-                == (dst_span.code_line as *const ProfileCodeLine)
+            std::ptr::eq(src_span.code_line, dst_span.code_line)
         );
 
         dst_span.duration += src_span.duration;
@@ -289,14 +282,6 @@ impl Profiler {
         }
     }
 
-    /// Clone profiler data
-    pub fn clone(&self) -> Profiler {
-        Profiler {
-            spans: self.spans.clone(),
-            current_span: self.current_span,
-        }
-    }
-
     /// Dump profiler metrics
     pub fn dump(&self) -> String {
         let mut self_time_spans: Vec<(usize, u128)> = Vec::new();
@@ -315,14 +300,14 @@ impl Profiler {
     }
 
     /// Dump spans self time
-    fn dump_spans_self_time(&self, self_time_spans: &Vec<(usize, u128)>) -> String {
+    fn dump_spans_self_time(&self, self_time_spans: &[(usize, u128)]) -> String {
         let mut total_duration = 0;
 
         for (_, self_duration) in self_time_spans.iter() {
             total_duration += self_duration;
         }
 
-        let mut result = format!("Self time:");
+        let mut result = "Self time:".to_string();
 
         for (span_index, self_duration) in self_time_spans.iter().rev() {
             let percentage = (*self_duration as f64) / (total_duration as f64) * 100.0;
@@ -386,7 +371,7 @@ impl Profiler {
 
         self_time_spans.push((parent_span_index, self_duration));
 
-        if sorted_spans.len() > 0 {
+        if !sorted_spans.is_empty() {
             sorted_spans.push((parent_span_index as i64, self_duration));
         }
 
@@ -478,13 +463,13 @@ impl ExecutionTimeGuard {
         code_line: &'static ProfileCodeLine,
         max_duration: &'static std::time::Duration,
     ) -> Self {
-        let body = Self {
-            start_time: std::time::Instant::now(),
-            code_line: code_line,
-            max_duration: max_duration,
-        };
+        
 
-        body
+        Self {
+            start_time: std::time::Instant::now(),
+            code_line,
+            max_duration,
+        }
     }
 }
 

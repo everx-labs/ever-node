@@ -184,7 +184,7 @@ fn parse_int<Q: ToString>(param_opt: Option<Q>, name: &str) -> Result<ton::int> 
 }
 
 fn parse_blockid<Q: ToString>(param_opt: Option<Q>, name: &str) -> Result<BlockIdExt> {
-    parse_any(param_opt, name, |value| BlockIdExt::from_str(value))
+    parse_any(param_opt, name, BlockIdExt::from_str)
 }
 
 fn now() -> ton::int {
@@ -372,7 +372,7 @@ impl <Q: ToString> SendReceive<Q> for AddAdnlAddr {
     fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
         let key_hash = parse_int256(params.next(), "key_hash")?;
         let category = parse_int(params.next(), "category")?;
-        if category < 0 || category > 15 {
+        if !(0..=15).contains(&category) {
             fail!("category must be not negative and less than 16")
         }
         Ok(TLObject::new(ton::rpc::engine::validator::AddAdnlId {
@@ -398,7 +398,7 @@ impl <Q: ToString> SendReceive<Q> for FutureBundle {
             prev_block_ids.push(block_id);
         }
         Ok(TLObject::new(ton::rpc::engine::validator::GetFutureBundle {
-            prev_block_ids: prev_block_ids.into()
+            prev_block_ids
         }))
     }
 }
@@ -408,7 +408,7 @@ impl <Q: ToString> SendReceive<Q> for SendMessage {
         let filename = params.next().ok_or_else(|| error!("insufficient parameters"))?.to_string();
         let body = std::fs::read(&filename)
             .map_err(|e| error!("Can't read file {} with message: {}", filename, e))?;
-        Ok(TLObject::new(ton::rpc::lite_server::SendMessage {body: body.into()}))
+        Ok(TLObject::new(ton::rpc::lite_server::SendMessage {body}))
     }
 }
 
@@ -450,6 +450,9 @@ impl <Q: ToString> SendReceive<Q> for GetBlock {
             fail!("block not found!")
         }
 
+        // skip block_id
+        params.next();
+
         let boc_name = params.next()
             .map_or_else(|| format!("block_boc_{:x}.boc", data.id().root_hash()), |s| s.to_string());
 
@@ -457,8 +460,8 @@ impl <Q: ToString> SendReceive<Q> for GetBlock {
             .map_err(|err| error!("Can`t create file {}: {}", boc_name, err))?;
 
         Ok((format!("{} {}",
-            hex::encode(&data.data()),
-            base64_encode(&data.data())),
+            hex::encode(data.data()),
+            base64_encode(data.data())),
             data.only().data)
         )
     }
@@ -474,19 +477,18 @@ impl <Q: ToString> SendReceive<Q> for GetBlockchainConfig {
         // We use config_proof because we use standard struct ConfigInfo from ton-tl and
         // ConfigInfo doesn`t contain more suitable fields
         let config_param = hex::encode(config_info.config_proof().clone());
-        Ok((format!("{}", config_param), config_info.config_proof().clone()))
+        Ok((config_param.to_string(), config_info.config_proof().clone()))
     }
 }
 
 impl <Q: ToString> SendReceive<Q> for GetConfig {
     fn send(params: &mut impl Iterator<Item = Q>) -> Result<TLObject> {
         let param_number = parse_int(params.next(), "paramnumber")?;
-        let mut params = Vec::new();
-        params.push(param_number);
+        let param_list = vec!(param_number);
         Ok(TLObject::new(ton::rpc::lite_server::GetConfigParams {
             mode: 0,
             id: BlockIdExt::default(),
-            param_list: params
+            param_list
         }))
     }
     fn receive(answer: TLObject, _params: &mut impl Iterator) -> Result<(String, Vec<u8>)> {
@@ -520,12 +522,12 @@ fn receive_and_save_shard_account_state<Q: ToString>(
         .shard_account()
         .ok_or_else(|| error!("account not found!"))?;
     
-    let shard_account = ShardAccount::construct_from_bytes(&shard_account_state)?;
+    let shard_account = ShardAccount::construct_from_bytes(shard_account_state)?;
     let account_state = write_boc(&shard_account.account_cell())?;
     std::fs::write(boc_name, &account_state)
         .map_err(|err| error!("Can`t create file: {}", err))?;
 
-    Ok((format!("{}", base64_encode(&account_state)), account_state)
+    Ok((base64_encode(&account_state), account_state)
     )
 }
 
@@ -790,7 +792,7 @@ impl ControlClient {
         let max_factor = self.config.max_factor.ok_or_else(
             || error!("you must give max_factor as real")
         )?;
-        if max_factor < 1.0 || max_factor > 100.0 {
+        if !(1.0..=100.0).contains(&max_factor) {
             fail!("<max-factor> must be a real number 1..100")
         }
         let max_factor = (max_factor * 65536.0) as u32;
@@ -1012,12 +1014,9 @@ impl ControlClient {
                                     token.cancel();
                                     break
                                 }
-                                match sender.send(msg) {
-                                    Err(e) => {
-                                        log::warn!("Proxy error: {}", e);
-                                        break
-                                    },
-                                    _ => ()
+                                if let Err(e) = sender.send(msg) {
+                                    log::warn!("Proxy error: {}", e);
+                                    break
                                 }
                             }
                         }
@@ -1161,7 +1160,7 @@ async fn main() {
 
     let config = args.value_of("CONFIG").expect("required set for config");
     let config = std::fs::read_to_string(config)
-        .expect(&format!("Can't read config file {}", config));
+        .unwrap_or_else(|_| panic!("Can't read config file {}", config));
     let config = serde_json::from_str(&config).expect("Can't parse config");
     let timeout = match args.value_of("TIMEOUT") {
         Some(timeout) => u64::from_str(timeout).expect("timeout must be set in microseconds"),
@@ -1200,17 +1199,11 @@ async fn main() {
 mod test {
     
     use super::*;
-    use rand::{Rng, SeedableRng};
-    use std::{
-        cmp::min, fs, path::Path, sync::{Arc, atomic::{AtomicU64, Ordering}},
-        time::{Duration, Instant}, thread
-    };
-    use serde_json::json;
-    use storage::block_handle_db::BlockHandle;
-    use tokio::io::AsyncWriteExt;
-    use ton_api::deserialize_boxed;
     use ever_block::{
-        generate_test_account_by_init_code_hash, Account, Block, BlockInfo, BlockLimits, Cell, ConfigParam0, ConfigParam34, ConfigParamEnum, CurrencyCollection, HashmapAugType, McStateExtra, MsgAddressInt, ParamLimits, ShardAccounts, ShardIdent, ShardStateUnsplit, StateInit, ValidatorDescr, ValidatorSet
+        Account, Block, BlockInfo, BlockLimits, Cell, ConfigParam0, ConfigParam34,
+        ConfigParamEnum, CurrencyCollection, generate_test_account_by_init_code_hash,
+        HashmapAugType, McStateExtra, MsgAddressInt, ParamLimits, ShardAccounts,
+        ShardIdent, ShardStateUnsplit, StateInit, ValidatorDescr, ValidatorSet
     };
     use ever_node::{
         block::BlockKind, collator_test_bundle::create_engine_allocated,
@@ -1224,6 +1217,15 @@ mod test {
     use ever_node::engine_traits::EngineTelemetry;
     #[cfg(feature = "telemetry")]
     use ever_node::collator_test_bundle::create_engine_telemetry;
+
+    use rand::{Rng, SeedableRng};
+    use std::{
+        cmp::min, fs, path::Path, sync::{Arc, atomic::{AtomicU64, Ordering}},
+        time::{Duration, Instant}, thread
+    };
+    use storage::block_handle_db::BlockHandle;
+    use tokio::io::AsyncWriteExt;
+    use ton_api::deserialize_boxed;
 
     const CFG_DIR: &str = "./target";
     const CFG_NODE_FILE: &str = "light_node.json";
@@ -1250,22 +1252,30 @@ mod test {
             telemetry: Arc<EngineTelemetry>,
             allocated: Arc<EngineAlloc>
         ) -> Self {
-            fs::remove_dir_all(DB_PATH).ok();
-            let db_config = InternalDbConfig {
-                db_directory: String::from(DB_PATH),
-                ..Default::default()
-            };
-            let db = InternalDb::with_update(
-                db_config, 
-                false,
-                false,
-                false,
-                &|| Ok(()),
-                None,
-                #[cfg(feature = "telemetry")]
-                telemetry.clone(),
-                allocated.clone()
-            ).await.unwrap();
+            let mut db = Err(error!("Unreachable"));
+            for _ in 0..10 {
+                fs::remove_dir_all(DB_PATH).ok();
+                let db_config = InternalDbConfig {
+                    db_directory: String::from(DB_PATH),
+                    ..Default::default()
+                };
+                db = InternalDb::with_update(
+                    db_config, 
+                    false,
+                    false,
+                    false,
+                    &|| Ok(()),
+                    None,
+                    #[cfg(feature = "telemetry")]
+                    telemetry.clone(),
+                    allocated.clone()
+                ).await;
+                if db.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+            }
+            let db = db.unwrap_or_else(|err| panic!("Can't create db: {}", err));
 
             let mut states = HashMap::new();
 
@@ -1825,7 +1835,7 @@ mod test {
             network.config_handler(),//.clone(),
             Some(&network)//None
         ).await.unwrap();
-        let config = serde_json::from_str(&ADNL_CLIENT_CONFIG).unwrap();
+        let config = serde_json::from_str(ADNL_CLIENT_CONFIG).unwrap();
         let client = ControlClient::connect(config).await.unwrap();
         (server, client, engine)
     }
@@ -1836,10 +1846,11 @@ mod test {
         engine.stop().await;
         drop(engine);
         loop {
-            if fs::remove_dir_all(DB_PATH).is_ok() {
+            let ok = fs::remove_dir_all(DB_PATH).is_ok();
+            thread::sleep(Duration::from_millis(10));
+            if ok {
                 break
             }
-            thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -1860,13 +1871,13 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_getblock() {
-        let cmd = "getblock 17";
+        let cmd = "getblock 17 ./target/17.boc";
         test_one_cmd(cmd, |result| {
             assert_eq!(result.len(), 344);
             let block = Block::construct_from_bytes(&result).unwrap();
             assert_eq!(block.read_info().unwrap().seq_no(), 17);
         }).await;
-        let cmd = "getblock 19";
+        let cmd = "getblock 19 ./target/19.boc";
         test_one_cmd(cmd, |result| {
             assert_eq!(result.len(), 344);
             let block = Block::construct_from_bytes(&result).unwrap();
@@ -2150,27 +2161,27 @@ mod test {
     fn test_stats_to_json() {
         let mut stats = [OneStat { key: "key".to_string(), value: String::new()}];
         let value = stats_to_json(stats.iter());
-        let ethalon = json!({"key": "null"});
+        let ethalon = serde_json::json!({"key": "null"});
         assert_eq!(ethalon, value);
 
         stats[0].value = "12345".into();
         let value = stats_to_json(stats.iter());
-        let ethalon = json!({"key": 12345});
+        let ethalon = serde_json::json!({"key": 12345});
         assert_eq!(ethalon, value);
 
         stats[0].value = "\"Some text\"".into();
         let value = stats_to_json(stats.iter());
-        let ethalon = json!({"key": "Some text"});
+        let ethalon = serde_json::json!({"key": "Some text"});
         assert_eq!(ethalon, value);
 
         stats[0].value = "\"777\"".into();
         let value = stats_to_json(stats.iter());
-        let ethalon = json!({"key": "777"});
+        let ethalon = serde_json::json!({"key": "777"});
         assert_eq!(ethalon, value);
 
-        stats[0].value = json!({"a": 777}).to_string();
+        stats[0].value = serde_json::json!({"a": 777}).to_string();
         let value = stats_to_json(stats.iter());
-        let ethalon = json!({"key": {"a": 777}});
+        let ethalon = serde_json::json!({"key": {"a": 777}});
         assert_eq!(ethalon, value);
     }
 
@@ -2228,12 +2239,12 @@ mod test {
                 let start = Instant::now();
                 let count = 100000;
                 for _ in 0..count {
-                    let range = rand::distributions::Uniform::new(256, 1*1024);
-                    let len = rng.sample(&range);
+                    let range = rand::distributions::Uniform::new(256, 1024);
+                    let len = rng.sample(range);
                     let msg = generate_boc(len).unwrap();
                     let len = (msg.len() as u16).to_be_bytes();
-                    stream.write(&len[..]).await.unwrap();
-                    stream.write(&msg[..]).await.unwrap();
+                    stream.write_all(&len[..]).await.unwrap();
+                    stream.write_all(&msg[..]).await.unwrap();
                 }
                 println!(
                     "Generated {} messages during {} ms", 
@@ -2248,16 +2259,16 @@ mod test {
                 );
                 let close = "close_proxy";
                 let len = (close.as_bytes().len() as u16).to_be_bytes();
-                stream.write(&len[..]).await.unwrap();
-                stream.write(close.as_bytes()).await.unwrap();
+                stream.write_all(&len[..]).await.unwrap();
+                stream.write_all(close.as_bytes()).await.unwrap();
             }
         );
         
         let (server, mut client, engine) = init_test(Some(counter.clone())).await;
         let (_, result) = client.command("ext_msg_proxy 4001").await.unwrap();
         let mut count: u64 = 0;
-        for i in 0..result.len() {
-            count = (count << 8) | (result[i] as u64);
+        for i in &result {
+            count = (count << 8) | (*i as u64);
         }
         assert_eq!(count, counter.load(Ordering::Relaxed));
         done_test(server, client, engine).await;

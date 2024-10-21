@@ -39,6 +39,8 @@ mod shard_blocks;
 
 include!("../common/src/info.rs");
 
+#[cfg(feature = "tracing")]
+pub mod jaeger;
 
 #[cfg(feature = "external_db")]
 mod external_db;

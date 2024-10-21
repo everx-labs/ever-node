@@ -66,12 +66,10 @@ async fn test_awaiters_pool() {
                             } else {
                                 assert_eq!(n.load(Ordering::SeqCst), id + 1);
                             }
+                        } else if let Some(nn) = pool.wait(&id, None, || Ok(false)).await.unwrap() {
+                            assert_eq!(nn, id + 1);
                         } else {
-                            if let Some(nn) = pool.wait(&id, None, || Ok(false)).await.unwrap() {
-                                assert_eq!(nn, id + 1);
-                            } else {
-                                assert_eq!(n.load(Ordering::SeqCst), id + 1);
-                            }
+                            assert_eq!(n.load(Ordering::SeqCst), id + 1);
                         }
                     }
                     sum.fetch_add(1, Ordering::SeqCst);

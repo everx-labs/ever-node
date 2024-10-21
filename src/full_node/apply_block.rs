@@ -43,19 +43,19 @@ pub async fn apply_block(
 
     if handle.is_queue_update() {
         calc_out_msg_queue(handle, block, &prev_ids, engine).await?;
-        set_prev_ids(&handle, &prev_ids, engine.deref())?;
-        set_next_ids(&handle, &prev_ids, engine.deref())?;
+        set_prev_ids(handle, &prev_ids, engine.deref())?;
+        set_next_ids(handle, &prev_ids, engine.deref())?;
     } else if handle.is_mesh() {
         calc_mesh_queues(handle, block, &prev_ids, engine).await?;
-        set_prev_ids(&handle, &prev_ids, engine.deref())?;
-        set_next_ids(&handle, &prev_ids, engine.deref())?;
+        set_prev_ids(handle, &prev_ids, engine.deref())?;
+        set_next_ids(handle, &prev_ids, engine.deref())?;
     } else {
         if !handle.has_state() {
             calc_shard_state(handle, block, &prev_ids, engine).await?;
         }
-        set_prev_ids(&handle, &prev_ids, engine.deref())?;
+        set_prev_ids(handle, &prev_ids, engine.deref())?;
         if !pre_apply {
-            set_next_ids(&handle, &prev_ids, engine.deref())?;
+            set_next_ids(handle, &prev_ids, engine.deref())?;
         }
     }
     Ok(())
@@ -71,13 +71,10 @@ async fn check_prev_blocks(
 ) -> Result<()> {
     match prev_ids {
         (prev1_id, Some(prev2_id)) => {
-            let mut apply_prev_futures = Vec::with_capacity(2);
-            apply_prev_futures.push(
-                engine.clone().download_and_apply_block_internal(&prev1_id, mc_seq_no, pre_apply, recursion_depth + 1)
-            );
-            apply_prev_futures.push(
-                engine.clone().download_and_apply_block_internal(&prev2_id, mc_seq_no, pre_apply, recursion_depth + 1)
-            );
+            let apply_prev_futures = vec![
+                engine.clone().download_and_apply_block_internal(prev1_id, mc_seq_no, pre_apply, recursion_depth + 1),
+                engine.clone().download_and_apply_block_internal(prev2_id, mc_seq_no, pre_apply, recursion_depth + 1),
+            ];
             futures::future::join_all(apply_prev_futures)
                 .await
                 .into_iter()
@@ -85,7 +82,7 @@ async fn check_prev_blocks(
                 .unwrap_or(Ok(()))?;
         },
         (prev_id, None) => {
-            engine.clone().download_and_apply_block_internal(&prev_id, mc_seq_no, pre_apply, recursion_depth + 1).await?;
+            engine.clone().download_and_apply_block_internal(prev_id, mc_seq_no, pre_apply, recursion_depth + 1).await?;
         }
     }
     Ok(())
@@ -246,7 +243,7 @@ pub async fn calc_mesh_queues(
         let old_queue = engine.load_mesh_queue(
             mesh_update.network_global_id(),
             &prev_ids.0,
-            &src_shard
+            src_shard
         )?;
         let old_queue_root = old_queue.write_to_new_cell()?.into_cell()?;
 
@@ -259,7 +256,7 @@ pub async fn calc_mesh_queues(
         }
 
         let new_queue = if cn_descr.out_queue_update.old_hash != cn_descr.out_queue_update.new_hash {
-            let new_queue_root = mesh_update.mesh_update(&src_shard)?.apply_for(&old_queue_root)?;
+            let new_queue_root = mesh_update.mesh_update(src_shard)?.apply_for(&old_queue_root)?;
             let new_hash = new_queue_root.repr_hash();
             if new_queue_root.repr_hash() != cn_descr.out_queue_update.new_hash {
                 fail!(
@@ -274,8 +271,8 @@ pub async fn calc_mesh_queues(
 
         engine.store_mesh_queue(
             mesh_update.network_global_id(),
-            &mesh_update.id(),
-            &src_shard,
+            mesh_update.id(),
+            src_shard,
             new_queue
         )?;
 
@@ -322,11 +319,11 @@ pub fn set_next_ids(
     match prev_ids {
         (prev_id1, Some(prev_id2)) => {
             // After merge
-            let prev_handle1 = engine.load_block_handle(&prev_id1)?.ok_or_else(
+            let prev_handle1 = engine.load_block_handle(prev_id1)?.ok_or_else(
                 || error!("Cannot load handle for prev1 block {}", prev_id1)
             )?;
             engine.store_block_next1(&prev_handle1, handle.id())?;
-            let prev_handle2 = engine.load_block_handle(&prev_id2)?.ok_or_else(
+            let prev_handle2 = engine.load_block_handle(prev_id2)?.ok_or_else(
                 || error!("Cannot load handle for prev2 block {}", prev_id2)
             )?;
             engine.store_block_next1(&prev_handle2, handle.id())?;
@@ -335,7 +332,7 @@ pub fn set_next_ids(
             // if after split and it is second ("1" branch) shard - set next2 for prev block
             let prev_shard = prev_id.shard().clone();
             let shard = handle.id().shard().clone();
-            let prev_handle = engine.load_block_handle(&prev_id)?.ok_or_else(
+            let prev_handle = engine.load_block_handle(prev_id)?.ok_or_else(
                 || error!("Cannot load handle for prev block {}", prev_id)
             )?;
             if (prev_shard != shard) && (prev_shard.split()?.1 == shard) {
@@ -358,11 +355,11 @@ pub fn set_prev_ids(
     match prev_ids {
         (prev_id1, Some(prev_id2)) => {
             // After merge
-            engine.store_block_prev1(handle, &prev_id1)?;
-            engine.store_block_prev2(handle, &prev_id2)?;
+            engine.store_block_prev1(handle, prev_id1)?;
+            engine.store_block_prev2(handle, prev_id2)?;
         },
         (prev_id, None) => {
-            engine.store_block_prev1(handle, &prev_id)?;
+            engine.store_block_prev1(handle, prev_id)?;
         }
     }
     Ok(())

@@ -44,11 +44,11 @@ async fn test_receiver() {
     let mut sources: Vec<CatchainNode> = Vec::new();
     let mut receivers: Vec<ReceiverPtr> = Vec::new();
 
-    for i in 0..11 {
-        let public_key = parse_hex_as_public_key_raw(&source_ids[i]);
+    for source_id in source_ids {
+        let public_key = parse_hex_as_public_key_raw(source_id);
         let public_key_hash = get_public_key_hash(&public_key);
 
-        print!("{:?}\n", public_key_hash);
+        println!("{:?}", public_key_hash);
 
         sources.push(CatchainNode {
             public_key: public_key.clone(),
@@ -79,7 +79,7 @@ async fn test_receiver() {
         .borrow_mut()
         .receive_message_from_overlay(&source_key_hash, &mut message.as_ref())
     {
-        Ok(block) => println!("Block is received: {}", block.borrow().to_string()),
+        Ok(block) => println!("Block is received: {}", block.borrow()),
         Err(err) => println!("Block receiving error: {}", err),
     };
 

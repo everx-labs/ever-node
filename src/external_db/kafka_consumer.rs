@@ -88,6 +88,13 @@ impl KafkaConsumer {
             };
             consumer.commit_message(&borrowed_message, rdkafka::consumer::CommitMode::Async)?;
             log::trace!("Processed record, {}, time: {} mcs", message_descr, now.elapsed().as_micros());
+
+            #[cfg(feature = "tracing")]
+            if let Some(msg_key) = rdkafka::Message::key(&borrowed_message) {
+                crate::jaeger::message_from_kafka_received(msg_key);
+            } else {
+                log::error!(target: "jaeger", "Can't read key from record");
+            }
         }
 
         Ok(())

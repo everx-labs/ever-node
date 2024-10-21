@@ -54,10 +54,7 @@ impl HangCheck {
                     break;
                 }
 
-                let processing_delay = match start_time.elapsed() {
-                    Ok(elapsed) => elapsed,
-                    Err(_err) => std::time::Duration::default(),
-                };
+                let processing_delay = start_time.elapsed().unwrap_or_default();
 
                 warn!(target: "verificator", "{} is hanging for {:.3}s", name, processing_delay.as_secs_f64());
 
@@ -83,7 +80,7 @@ impl Drop for HangCheck {
 
 pub(crate) fn get_adnl_id(validator: &ValidatorDescr) -> Arc<KeyId> {
     super::super::validator_utils::get_adnl_id(validator)
-    //ever_crypto::KeyId::from_data(validator.compute_node_id_short().inner())
+    //ever_block::KeyId::from_data(validator.compute_node_id_short().inner())
 }
 
 pub(crate) fn into_public_key_tl(opt: &Arc<dyn KeyOption>) -> Result<ton_api::ton::PublicKey> {
@@ -101,7 +98,7 @@ pub(crate) fn generate_test_bls_key(public_key: &Arc<dyn KeyOption>) -> Result<A
 
     let public_key_data = public_key.pub_key()?;
     let mut ikm: [u8; BLS_KEY_MATERIAL_LEN] = [0; BLS_KEY_MATERIAL_LEN];
-    ikm.copy_from_slice(&public_key_data);
+    ikm.copy_from_slice(public_key_data);
 
     let bls_key = Arc::new(BlsKeyOption::from_key_material(&ikm)?);
     

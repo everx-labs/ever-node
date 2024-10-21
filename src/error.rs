@@ -23,6 +23,8 @@ pub enum NodeError {
     ValidatorReject(String),
     #[error("{0}")]
     ValidatorSoftReject(String),
+    #[error("Timeout {0}")]
+    Timeout(String),
     #[cfg(feature = "external_db")]
     #[error("{0}")]
     #[allow(dead_code)]

@@ -108,8 +108,8 @@ where
     );
 
     let handler = move |result: Result<T>| {
-        if let Some(mut queue) = queue_weak_ptr.upgrade() {
-            post_closure(&mut queue, move |processor: &mut dyn SessionProcessor| {
+        if let Some(queue) = queue_weak_ptr.upgrade() {
+            post_closure(&queue, move |processor: &mut dyn SessionProcessor| {
                 if let Some(mut handler) = processor.remove_completion_handler(handler_index) {
                     if let Some(handler) = handler
                         .get_mut_impl()
@@ -141,14 +141,16 @@ pub trait CompletionHandler {
     fn get_mut_impl(&mut self) -> &mut dyn std::any::Any;
 }
 
+type SessionProcessorCallback<T> = Box<dyn FnOnce(Result<T>, &mut dyn SessionProcessor)>;
+
 /// Completion handler wrapper for single-threaded usage
 struct SingleThreadedCompletionHandler<T> {
-    handler: Option<Box<dyn FnOnce(Result<T>, &mut dyn SessionProcessor)>>,
+    handler: Option<SessionProcessorCallback<T>>,
     creation_time: std::time::SystemTime,
 }
 
 impl<T> SingleThreadedCompletionHandler<T> {
-    fn new(handler: Box<dyn FnOnce(Result<T>, &mut dyn SessionProcessor)>) -> Self {
+    fn new(handler: SessionProcessorCallback<T>) -> Self {
         Self {
             handler: Some(handler),
             creation_time: std::time::SystemTime::now(),
