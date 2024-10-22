@@ -386,9 +386,9 @@ fn test_clean_queue() {
             }
 
             if enq.created_lt() <= clean_lt {
-                return Ok(HashmapFilterResult::Remove);
+                Ok(HashmapFilterResult::Remove)
             } else {
-                return Ok(HashmapFilterResult::Accept);
+                Ok(HashmapFilterResult::Accept)
             }
         })
     }
@@ -398,8 +398,8 @@ fn test_clean_queue() {
         log_msgs_order: bool,
     ) -> Result<()> {
         let mut log_num = 0;
-        let mut iter = MsgQueueMergerIterator::from_queue(&queue)?;
-        while let Some(k_v) = iter.next() {
+        let iter = MsgQueueMergerIterator::from_queue(&queue)?;
+        for k_v in iter {
             let (key, enq, lt, _) = k_v?;
 
             if log_msgs_order {
@@ -439,9 +439,9 @@ fn test_clean_queue() {
             }
 
             if enq.created_lt() <= clean_lt {
-                return Ok(HashmapFilterResult::Remove);
+                Ok(HashmapFilterResult::Remove)
             } else {
-                return Ok(HashmapFilterResult::Accept);
+                Ok(HashmapFilterResult::Accept)
             }
         }, None)?;
 
@@ -501,10 +501,10 @@ fn test_clean_queue() {
 
             if enq.created_lt() <= clean_lt {
                 deleted += 1;
-                return Ok(HashmapFilterResult::Remove);
+                Ok(HashmapFilterResult::Remove)
             } else {
                 skipped += 1;
-                return Ok(HashmapFilterResult::Accept);
+                Ok(HashmapFilterResult::Accept)
             }
         })?;
 
@@ -541,10 +541,10 @@ fn test_clean_queue() {
 
                     if enq.created_lt() <= clean_lt {
                         deleted += 1;
-                        return Ok(HashmapFilterResult::Remove);
+                        Ok(HashmapFilterResult::Remove)
                     } else {
                         skipped += 1;
-                        return Ok(HashmapFilterResult::Accept);
+                        Ok(HashmapFilterResult::Accept)
                     }
                 },
                 None,

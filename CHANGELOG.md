@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.60.6
+
+- Fixed clippy warnings
+
+## Version 0.60.5
+
+- Fixed clippy warnings
+
+## Version 0.60.4
+
+- Fixed warnings after audit
+
+## Version 0.60.3
+
+- Fix serialization cache for SMFT block status
+- Turned off REMP Absent check reaction (SMFT issue)
+
+## Version 0.60.2
+
+- Added severity for validate query
+
+## Version 0.60.1
+
+- Fixed too frequent logging of cells db's telemetry
+
 ## Version 0.60.0
 
 - Cells db performance optimization. Added new 6th version of node database, migration performs automatically on startup.

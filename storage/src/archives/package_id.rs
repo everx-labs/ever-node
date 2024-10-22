@@ -64,7 +64,7 @@ impl PackageId {
 
     #[allow(dead_code)]
     pub const fn is_empty(&self) -> bool {
-        self.id == u32::max_value()
+        self.id == u32::MAX
     }
 
     pub fn path(&self) -> PathBuf {
@@ -112,6 +112,6 @@ impl Ord for PackageId {
 
 impl PartialOrd for PackageId {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.id().partial_cmp(&other.id())
+        Some(self.id().cmp(&other.id()))
     }
 }

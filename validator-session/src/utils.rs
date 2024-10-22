@@ -31,16 +31,12 @@ pub(crate) fn compute_hash_from_buffer(data: &[u8]) -> HashType {
 }
 
 pub(crate) fn compute_hash_from_buffer_u32(data: &[u32]) -> HashType {
-    let (head, body, tail) = unsafe { data.align_to::<u8>() };
-
-    assert!(head.is_empty());
-    assert!(tail.is_empty());
-
-    compute_hash_from_buffer(body)
+    let data: &[u8] = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
+    compute_hash_from_buffer(data)
 }
 
 pub(crate) fn compute_hash_from_bytes(data: &::ton_api::ton::bytes) -> HashType {
-    compute_hash_from_buffer(&data)
+    compute_hash_from_buffer(data)
 }
 
 pub(crate) fn compute_hash<T>(hashable: T) -> HashType
@@ -73,7 +69,7 @@ impl HashableObject for bool {
 impl HashableObject for BlockHash {
     fn get_hash(&self) -> HashType {
         compute_hash(ton::hashable::Int256 {
-            value: self.clone().into(),
+            value: self.clone(),
         })
     }
 }
@@ -110,10 +106,7 @@ where
     T: MovablePoolObject<T>,
 {
     fn move_to_persistent(&self, cache: &mut dyn SessionCache) -> Option<T> {
-        match self {
-            Some(obj) => Some(obj.move_to_persistent(cache)),
-            _ => None,
-        }
+        self.as_ref().map(|obj| obj.move_to_persistent(cache))
     }
 }
 
@@ -163,7 +156,7 @@ where
             return left.clone();
         }
 
-        Some(left_ptr.merge(&right_ptr, desc))
+        Some(left_ptr.merge(right_ptr, desc))
     }
 }
 
@@ -203,7 +196,7 @@ where
         let left_ptr = left.as_ref().unwrap();
         let right_ptr = right.as_ref().unwrap();
 
-        Some(left_ptr.merge_impl(&right_ptr, desc, merge_all, merge_fn))
+        Some(left_ptr.merge_impl(right_ptr, desc, merge_all, merge_fn))
     }
 }
 
@@ -245,7 +238,7 @@ where
         let left_ptr = left.as_ref().unwrap();
         let right_ptr = right.as_ref().unwrap();
 
-        Some(left_ptr.merge_impl(&right_ptr, desc, merge_all, merge_fn))
+        Some(left_ptr.merge_impl(right_ptr, desc, merge_all, merge_fn))
     }
 }
 

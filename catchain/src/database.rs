@@ -25,10 +25,10 @@ use ever_block::{fail, Result};
 */
 
 pub struct DatabaseImpl {
-    db: CatchainPersistentDb,                       //persistent storage
+    db: CatchainPersistentDb,         //persistent storage
     put_tx_counter: metrics::Counter, //DB put transactions counter
     get_tx_counter: metrics::Counter, //DB get transactions counter
-    destroy_db: Arc<AtomicBool>,                    //DB should be destroyed at drop
+    destroy_db: Arc<AtomicBool>,      //DB should be destroyed at drop
 }
 
 /*
@@ -56,10 +56,7 @@ impl Database for DatabaseImpl {
     fn is_block_in_db(&self, hash: &BlockHash) -> bool {
         instrument!();
 
-        match self.db.contains(hash) {
-            Ok(status) => status,
-            _ => false,
-        }
+        self.db.contains(hash).unwrap_or_default()
     }
 
     fn get_block(&self, hash: &BlockHash) -> Result<RawBuffer> {
@@ -80,9 +77,8 @@ impl Database for DatabaseImpl {
 
         self.put_tx_counter.increment(1);
 
-        match self.db.put(hash, &data) {
-            Err(err) => log::error!("Block {} DB saving error: {:?}", hash, err),
-            _ => (),
+        if let Err(err) = self.db.put(hash, &data) {
+            log::error!("Block {} DB saving error: {:?}", hash, err)
         }
     }
 
@@ -90,9 +86,8 @@ impl Database for DatabaseImpl {
         check_execution_time!(50000);
         instrument!();
 
-        match self.db.delete(hash) {
-            Err(err) => log::warn!("Block {} DB erasing error: {:?}", hash, err),
-            _ => (),
+        if let Err(err) = self.db.delete(hash) {
+            log::warn!("Block {} DB erasing error: {:?}", hash, err)
         }
     }
 }

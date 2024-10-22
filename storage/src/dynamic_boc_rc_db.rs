@@ -141,8 +141,8 @@ impl DynamicBocDb {
         allocated: Arc<StorageAlloc>
     ) -> Result<Self> {
         let raw_cells_cache = RawCellsCache::new(cache_size_bytes);
-        if db.cf_handle(&cell_db_cf).is_none() {
-            db.create_cf(&cell_db_cf, &Self::build_cf_options())?;
+        if db.cf_handle(cell_db_cf).is_none() {
+            db.create_cf(cell_db_cf, &Self::build_cf_options())?;
         }
         let counters_cf_name = format!("{}_counters", cell_db_cf);
         if db.cf_handle(&counters_cf_name).is_none() {
@@ -261,6 +261,7 @@ impl DynamicBocDb {
             })
         };
 
+        #[allow(clippy::type_complexity)]
         async fn writer(
             db: &DynamicBocDb, 
             mut rx: tokio::sync::mpsc::Receiver<(Box<[u8]>, Box<[u8]>)>
@@ -326,15 +327,12 @@ impl DynamicBocDb {
     }
 
     #[cfg(test)]
-    pub fn len(&self) -> usize {
-        let mut len = 0;
-        let Ok(cf) = self.counters_cf() else {
-            return 0;
-        };
-        for _ in self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start) {
-            len += 1;
+    pub fn count(&self) -> usize {
+        if let Ok(cf) = self.counters_cf() {
+            self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start).count()
+        } else {
+            0
         }
-        len
     }
 
     // Is not thread-safe!
@@ -390,7 +388,7 @@ impl DynamicBocDb {
             }
 
             // counter
-            transaction.put_cf(&counters_cf, id.as_slice(), &vc.serialize_counter());
+            transaction.put_cf(&counters_cf, id.as_slice(), vc.serialize_counter());
         }
         log::debug!(
             target: TARGET,
@@ -505,7 +503,7 @@ impl DynamicBocDb {
                 transaction.delete_cf(&counters_cf, id.as_slice());
                 deleted += 1;
             } else {
-                transaction.put_cf(&counters_cf, id.as_slice(), &counter.to_le_bytes());
+                transaction.put_cf(&counters_cf, id.as_slice(), counter.to_le_bytes());
 
                 // update old format cell
                 if let Some(cell) = cell.serialize_cell()? {
@@ -916,8 +914,8 @@ impl DoneCellsStorage for DoneCellsStorageAdapter {
     }
 
     fn get(&self, index: u32) -> Result<Cell> {
-        let id = UInt256::from_slice(self.index.get(&index.into())?.as_ref()).into();
-        Ok(self.boc_db.clone().load_cell(&id, false, true)?)
+        let id = UInt256::from_slice(self.index.get(&index.into())?.as_ref());
+        self.boc_db.clone().load_cell(&id, false, true)
     }
 
     fn cleanup(&mut self) -> Result<()> {
@@ -947,7 +945,7 @@ impl CellByHashStorageAdapter {
 
 impl CellByHashStorage for CellByHashStorageAdapter {
     fn get_cell_by_hash(&self, hash: &UInt256) -> Result<Cell> {
-        self.boc_db.clone().load_cell(&hash, self.use_cache, true)
+        self.boc_db.clone().load_cell(hash, self.use_cache, true)
     }
 }
 
@@ -1016,7 +1014,7 @@ impl OrderedCellsStorage for OrderedCellsStorageAdapter {
     }
 
     fn get_cell_by_index(&self, index: u32) -> Result<Cell> {
-        let id = UInt256::from_slice(self.index1.get(&index.into())?.as_ref()).into();
+        let id = UInt256::from_slice(self.index1.get(&index.into())?.as_ref());
         let cell = self.boc_db.clone().load_cell(&id, false, true)?;
 
         let slowdown = self.slowdown();

@@ -64,7 +64,7 @@ fn test_construct_and_check_prev_stuff_master() {
     assert_eq!(stuff.mc_block_id, mc_block_id);
     assert_eq!(stuff.prev[0], mc_block_id);
     assert_eq!(stuff.prev.len(), 1);
-    assert_eq!(stuff._after_split, false);
+    assert!(!stuff._after_split);
 }
 
 #[test]
@@ -108,5 +108,5 @@ fn test_construct_and_check_prev_stuff_shard() {
     assert_eq!(stuff.mc_block_id, mc_block_id);
     assert_eq!(stuff.prev[0], prev_block_id);
     assert_eq!(stuff.prev.len(), 1);
-    assert_eq!(stuff._after_split, false);
+    assert!(!stuff._after_split);
 }

@@ -95,7 +95,7 @@ fn test_create_ext_message_bad_boc_cells() {
 fn test_create_ext_message_bad_message_format() {
     let msg = Message::with_int_header(InternalMessageHeader::default());
     let b = msg.serialize().unwrap();
-    let data = write_boc(&b.into()).unwrap();
+    let data = write_boc(&b).unwrap();
 
     create_ext_message(&data).expect_err("it must accept BOC only with external inbound message");
 }
@@ -104,7 +104,7 @@ fn test_create_ext_message_bad_message_format() {
 fn test_create_ext_message() {
     let msg = Message::with_ext_in_header(ExternalInboundMessageHeader::default());
     let b = msg.serialize().unwrap();
-    let data = write_boc(&b.into()).unwrap();
+    let data = write_boc(&b).unwrap();
 
     create_ext_message(&data).unwrap();
 }

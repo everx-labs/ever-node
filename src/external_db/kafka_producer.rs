@@ -184,7 +184,7 @@ impl KafkaProducer {
 
     async fn process_oversized(
         &self,
-        key: &Vec<u8>,
+        key: &[u8],
         key_str: &str,
         data: &[u8],
         attributes: Option<&[(&str, &[u8])]>,

@@ -77,7 +77,7 @@ impl SlashingManager {
 
     /// Update slashing statistics
     pub fn update_statistics(&self, stat: &SlashingValidatorStat) {
-        self.manager.lock().stat.merge(&stat);
+        self.manager.lock().stat.merge(stat);
         log::debug!(target: "slashing", "merge slashing statistics {:?}", stat);
     }
 
@@ -85,7 +85,7 @@ impl SlashingManager {
     fn is_slashing_available(mc_state: &ShardStateStuff) -> bool {
         if let Ok(config) = mc_state.config_params() {
             if let Ok(vset) = config.prev_validator_set() {
-                return vset.list().len() > 0 && vset.total_weight() > 0;
+                return !vset.list().is_empty() && vset.total_weight() > 0;
             }
         }
         false
@@ -220,7 +220,7 @@ impl SlashingManager {
         for validator in slashed_validators {
             match Self::prepare_slash_validator_message(
                 ELECTOR_ADDRESS.clone(),
-                &local_key,
+                local_key,
                 &validator.public_key,
                 validator.metric_id,
                 time_now_ms
@@ -233,7 +233,7 @@ impl SlashingManager {
             }
         }
 
-        if slashed_validators.len() > 0 {
+        if !slashed_validators.is_empty() {
             #[cfg(feature = "log_metrics")]
             Self::report_slashing_metrics(&aggregated_stat, local_key.id());
         }
@@ -263,9 +263,9 @@ impl SlashingManager {
         log::warn!(
             target: "slashing",
             "Slash validator {} on metric {:?} by reporter validator {}{}",
-            hex::encode(&victim_pubkey),
+            hex::encode(victim_pubkey),
             metric_id,
-            hex::encode(&reporter_pubkey),
+            hex::encode(reporter_pubkey),
             if metric_id != SlashingAggregatedMetric::ValidationScore as u8 { " (metric ignored)" } else { "" },
         );
 
@@ -276,7 +276,7 @@ impl SlashingManager {
         //compute signature for params
 
         let mut params_data = reporter_pubkey.to_vec();
-        params_data.extend_from_slice(&victim_pubkey);
+        params_data.extend_from_slice(victim_pubkey);
         params_data.push(metric_id);
         let signature = match reporter_privkey.sign(&params_data) {
             Ok(signature) => signature,
@@ -294,8 +294,8 @@ impl SlashingManager {
         let parameters: [Token; 5] = [
             Token::new("signature_hi", Self::convert_to_u256(&signature[..32])),
             Token::new("signature_lo", Self::convert_to_u256(&signature[32..])),
-            Token::new("reporter_pubkey", Self::convert_to_u256(&reporter_pubkey)),
-            Token::new("victim_pubkey", Self::convert_to_u256(&victim_pubkey)),
+            Token::new("reporter_pubkey", Self::convert_to_u256(reporter_pubkey)),
+            Token::new("victim_pubkey", Self::convert_to_u256(victim_pubkey)),
             Token::new(
                 "metric_id",
                 TokenValue::Uint(Uint::new(metric_id.into(), 8)),
@@ -308,7 +308,7 @@ impl SlashingManager {
         let dst = elector_address;
         let body = REPORT_FN
             .encode_input(&header, &parameters, INTERNAL_CALL, None, Some(dst.clone()))
-            .and_then(|builder| SliceData::load_builder(builder))
+            .and_then(SliceData::load_builder)
             .map_err(|err| error!("SlashingManager::prepare_slash_validator_message: failed to encode input: {:?}", err))?;
         log::trace!(target: "slashing", "message body {}", base64_encode(&write_boc(&body.cell())?));
 

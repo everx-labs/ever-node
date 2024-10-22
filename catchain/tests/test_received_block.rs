@@ -23,7 +23,7 @@ async fn test_received_block() {
     const DB_NAME: &str = "catchains_test_received_block";
     let db_path = Path::new(DB_PATH).join(DB_NAME).display().to_string();
     let receiver = CatchainFactory::create_dummy_receiver(db_path).unwrap();
-    let x = receiver.borrow().create_block_from_string_dump (&"
+    let x = receiver.borrow().create_block_from_string_dump ("
         payload.size = 16
         payload = e2567d17f4ef37dce2567d17f4ef37dc
         fork_id = 0
@@ -33,7 +33,7 @@ async fn test_received_block() {
         height = 1
         signature.size = 64
         signature = 1a512676c343e486bb65003b9cfa91cbadf0582bd5e8e1af5da6bf5168b463c7b5dadd447f06f90a4415a51a30e62b2a5fa46c7d613b1c95caae345f984ce70c
-    ".to_string());
+    ");
 
     assert_eq!(x.borrow().get_height(), 1);
     assert_eq!(x.borrow().get_fork_id(), 0);
@@ -55,7 +55,7 @@ async fn test_received_multiple_blocks() {
     const DB_NAME: &str = "catchains_test_received_multiple_blocks";
     let db_path = Path::new(DB_PATH).join(DB_NAME).display().to_string();
     let receiver = CatchainFactory::create_dummy_receiver(db_path).unwrap();
-    let x = receiver.borrow().create_block_from_string_dump (&"
+    let x = receiver.borrow().create_block_from_string_dump ("
         payload.size = 16
         payload = e2567d17f4ef37dce2567d17f4ef37dc
         fork_id = 0
@@ -65,9 +65,9 @@ async fn test_received_multiple_blocks() {
         height = 1
         signature.size = 64
         signature = 1a512676c343e486bb65003b9cfa91cbadf0582bd5e8e1af5da6bf5168b463c7b5dadd447f06f90a4415a51a30e62b2a5fa46c7d613b1c95caae345f984ce70c
-    ".to_string());
+    ");
 
-    let y = receiver.borrow().create_block_from_string_dump (&"
+    let y = receiver.borrow().create_block_from_string_dump ("
         payload.size = 16
         payload = c80e2e35477b28c0c80e2e35477b28c0
         fork_id = 0
@@ -77,7 +77,7 @@ async fn test_received_multiple_blocks() {
         height = 1
         signature.size = 64
         signature = 42947640891298f566a633ad56b5e700d649540e371825118dee1f10879e6a9b1b364b514c5a96aef9dbc62b6b42df5b8b4875f1443017428f764a0a5dfccf02
-    ".to_string());
+    ");
 
     assert_eq!(x.borrow().get_height(), 1);
     assert_eq!(x.borrow().get_fork_id(), 0);
@@ -87,7 +87,7 @@ async fn test_received_multiple_blocks() {
         "7070ad153095141ef18c18a49d8b7e7bcc49fc6ff87dd0185256ea23f5fa64c7"
     );
 
-    println!("y: {}", y.borrow().to_string());
+    println!("y: {}", y.borrow());
     println!("{}", receiver.borrow().to_string());
     receiver.borrow_mut().destroy_db();
     drop(receiver);

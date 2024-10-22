@@ -86,8 +86,8 @@ async fn test_remp_client_compact_protocol() -> Result<()> {
     for n in 0..messages {
 
         let mut id = [0; 32];
-        for i in 0..32 {
-            id[i] = ((n % 30) >> (8 * (i % 4))) as u8;
+        for (i, byte) in id.iter_mut().enumerate() {
+            *byte = ((n % 30) >> (8 * (i % 4))) as u8;
         }
 
         let r = ton_api::ton::ton_node::RempReceipt::TonNode_RempReceipt(
@@ -165,17 +165,17 @@ async fn test_remp_receipts_send_worker() -> Result<()> {
         telemetry.clone()
     );
 
-    let receipts_count = 10_000 as usize;
-    let nodes_count = 3 as usize;
-    let uniq_messages_count = (receipts_count / 20) as usize;
+    let receipts_count = 10_000_usize;
+    let nodes_count = 3_usize;
+    let uniq_messages_count = receipts_count / 20;
     let source_id = UInt256::from([0x11_u8; 32]);
 
 
     for n in 1..=receipts_count {
 
         let mut id = [0; 32];
-        for i in 0..32 {
-            id[i] = ((n % uniq_messages_count) >> (8 * (i % 4))) as u8;
+        for (i, byte) in id.iter_mut().enumerate() {
+            *byte = ((n % uniq_messages_count) >> (8 * (i % 4))) as u8;
         }
 
         let to = KeyId::from_data([(n % nodes_count) as u8; 32]);
@@ -199,7 +199,7 @@ async fn test_remp_receipts_send_worker() -> Result<()> {
 
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    assert!(sender.sent_receipts.lock().unwrap().len() >= nodes_count as usize);
+    assert!(sender.sent_receipts.lock().unwrap().len() >= nodes_count);
     log::info!("sent packages {}", sender.sent_receipts.lock().unwrap().len());
     log::info!("sent receipts {}", sender.sent_receipts.lock().unwrap().iter().map(|p| p.receipts().len()).sum::<usize>());
 

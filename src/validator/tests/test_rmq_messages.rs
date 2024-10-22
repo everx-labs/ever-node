@@ -63,7 +63,7 @@ fn test_rmq_message_serialize() -> Result<()> {
     let rmq_message_test0: Arc<RmqMessage> = Arc::new(RmqMessage::new(message)?);
 
     // Testing proper message serialization
-    let data: ton_api::ton::bytes = rmq_message_test0.message.write_to_bytes().unwrap().into();
+    let data: ton_api::ton::bytes = rmq_message_test0.message.write_to_bytes().unwrap();
     let msg_buffer = Message::construct_from_bytes(&data).unwrap();
     assert_eq!(*rmq_message_test0.message, msg_buffer);
 
@@ -119,7 +119,7 @@ fn make_vector_of_remp_records<F>(f: F) -> Vec<ton_api::ton::ton_node::RempCatch
     for i in 0..REMP_CATCHAIN_RECORDS_PER_BLOCK {
         res.push(f (i))
     }
-    return res;
+    res
 }
 
 #[test]
@@ -140,12 +140,13 @@ fn test_rmq_max_payload_constants() -> Result<()> {
 
     let (digest_payload, dp_ids) = RempCatchain::pack_payload(&make_vector_of_remp_records(
         |idx| {
-            let mut digest = ton_api::ton::ton_node::rempcatchainrecordv2::RempCatchainMessageDigestV2::default();
-            digest.masterchain_seqno = idx as i32;
-            digest.messages.push(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
-                id: Default::default(),
-                uid: Default::default()
-            });
+            let digest = ton_api::ton::ton_node::rempcatchainrecordv2::RempCatchainMessageDigestV2 {
+                masterchain_seqno: idx as i32,
+                messages: vec!(ton_api::ton::ton_node::rempcatchainmessageids::RempCatchainMessageIds {
+                    id: Default::default(),
+                    uid: Default::default()
+                })
+            };
             ton_api::ton::ton_node::RempCatchainRecordV2::TonNode_RempCatchainMessageDigestV2(digest)
         }
     ));
@@ -195,7 +196,7 @@ impl RmqTestbench {
             Ok(r) => r,
             Err(e) => fail!(e)
         };
-        return Ok(runtime);
+        Ok(runtime)
     }
 
     async fn new(runtime_handle: &tokio::runtime::Handle, masterchain_seqno: u32, rp_guarantee: Duration) -> Result<Self> {
@@ -225,7 +226,7 @@ impl RmqTestbench {
         for cc in 1..=masterchain_seqno {
             remp_manager.create_master_cc_session(cc, 0.into(), vec!())?;
         }
-        let masterchain_range = remp_manager.advance_master_cc(masterchain_seqno, rp_guarantee.clone())?;
+        let masterchain_range = remp_manager.advance_master_cc(masterchain_seqno, rp_guarantee)?;
 
         let queue_info = Arc::new(RempCatchainInfo::create(
             params.clone(), &masterchain_range,
@@ -336,8 +337,8 @@ fn remp_simple_forwarding_test() -> Result<()> {
         //testbench.remp_manager.options
         println!("{:?}", testbench.remp_manager.message_cache.get_message_with_origin_status_cc(m1.get_message_id()));
 
-        assert_eq!(testbench.send_pending_message(&m1, 1).await?, false); // false: we've added m1, but not m2
-        assert_eq!(testbench.send_pending_message(&m2, 1).await?, true);
+        assert!(!(testbench.send_pending_message(&m1, 1).await?)); // false: we've added m1, but not m2
+        assert!(testbench.send_pending_message(&m2, 1).await?);
 
         let ign = RempIgnored { level: RempMessageLevel::TonNode_RempMasterchain, block_id: blk1 };
         assert_eq!(testbench.remp_manager.message_cache.get_message_status(m1.get_message_id())?.unwrap(), RempMessageStatus::TonNode_RempIgnored(ign));
@@ -373,14 +374,13 @@ fn remp_simple_collation_equal_uids_test() -> Result<()> {
         let mut must_be_collated = HashSet::<UInt256>::new();
         must_be_collated.insert(msg_to_collate.clone());
         let must_be_rejected : Vec<RempMessageWithOrigin> = msgs.iter()
-            .filter(|a| !must_be_collated.contains(a.get_message_id()) && a.get_message_id() != acc_id)
-            .map(|a| a.clone())
+            .filter(|a| !must_be_collated.contains(a.get_message_id()) && a.get_message_id() != acc_id).cloned()
             .collect();
 
         for m in msgs.iter() {
             let pc = if must_be_collated.contains(m.get_message_id()) { "C" } else { "" }.to_string();
             let pa = if m.get_message_id() == acc_id { "A" } else { "" }.to_string();
-            let pr = if must_be_rejected.contains(&m) { "R" } else { "" }.to_string();
+            let pr = if must_be_rejected.contains(m) { "R" } else { "" }.to_string();
             println!("Pending msg: {:x} {}{}{}", m.get_message_id(), pc, pa, pr);
 
             // All msg ids are different, therefore body must be added
@@ -393,7 +393,7 @@ fn remp_simple_collation_equal_uids_test() -> Result<()> {
             master_id: Default::default()
         };
         testbench.remp_manager.message_cache.add_external_message_status(
-            &acc_id, &acc_uid, None, None,
+            acc_id, acc_uid, None, None,
             RempMessageStatus::TonNode_RempAccepted(accepted),
             |_o,n| n.clone(),
             2
@@ -408,7 +408,7 @@ fn remp_simple_collation_equal_uids_test() -> Result<()> {
 
         for (id, _msg, _origin) in messages.iter() {
             println!("collated: {:x}", id);
-            assert!(must_be_collated.remove(&id));
+            assert!(must_be_collated.remove(id));
         }
         assert!(must_be_collated.is_empty());
 
@@ -489,7 +489,7 @@ fn remp_simple_expiration_test() -> Result<()> {
         }
 
         for m in msgs.iter() {
-            match testbench.remp_interface_queues.check_remp_duplicate(&m.get_message_id())? {
+            match testbench.remp_interface_queues.check_remp_duplicate(m.get_message_id())? {
                 RempDuplicateStatus::Absent => panic!("Message {} must present", m),
                 RempDuplicateStatus::Fresh(uid) => panic!("Message {} must not be fresh with uid {:x}", m, uid),
                 RempDuplicateStatus::Duplicate(_, uid, _) => assert_eq!(m.message.message_uid, uid)

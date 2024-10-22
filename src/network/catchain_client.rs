@@ -53,11 +53,12 @@ declare_counted!(
 impl CatchainClient {
     const TARGET:  &'static str = "catchain_network";
 
+    #[allow(clippy::too_many_arguments)]
     pub (crate) fn new(
         runtime_handle: &tokio::runtime::Handle,
         overlay_id: &Arc<PrivateOverlayShortId>,
         network_context: &Arc<NetworkContext>,
-        nodes: &Vec<CatchainNode>,
+        nodes: &[CatchainNode],
         local_adnl_key: &Arc<dyn KeyOption>,
         local_validator_key: Arc<dyn KeyOption>,
         catchain_listener: CatchainOverlayListenerPtr,
@@ -84,7 +85,7 @@ impl CatchainClient {
         network_context.overlay.add_private_overlay(
             Some(runtime_handle.clone()), 
             overlay_id, 
-            &local_adnl_key, 
+            local_adnl_key, 
             &peers,
             if let Some(broadcast_hops) = broadcast_hops {
                 Some(broadcast_hops as u8)
@@ -95,15 +96,15 @@ impl CatchainClient {
         let consumer = Arc::new(
             CatchainClientConsumer::new(overlay_id.clone(), catchain_listener)
         );
-        network_context.overlay.add_consumer(&overlay_id, consumer.clone())?;
+        network_context.overlay.add_consumer(overlay_id, consumer.clone())?;
 
         let ret = CatchainClient {
             runtime_handle,
             overlay_id: overlay_id.clone(),
             network_context: network_context.clone(),
-            local_validator_key: local_validator_key,
+            local_validator_key,
             validator_keys: keys,
-            consumer: consumer,
+            consumer,
             is_stop: Arc::new(AtomicBool::new(false)),
             counter: network_context.engine_allocated.catchain_clients.clone().into()
         };
@@ -156,7 +157,7 @@ impl CatchainClient {
                 0 
             } else {
                 ((buf[3] as u32) << 24) | ((buf[2] as u32) << 16) | 
-                ((buf[1] as u32) <<  8) | ((buf[0] as u32) <<  0)
+                ((buf[1] as u32) <<  8) | (buf[0] as u32)
             };
             let msg = TaggedByteSlice {
                 object: buf,
@@ -194,7 +195,7 @@ impl CatchainClient {
         };
         let now = Instant::now();
         let result = overlay.query(
-            &receiver_id, 
+            receiver_id, 
             &query, 
             overlay_id,
             Some(AdnlNode::calc_timeout(Some(timeout.as_millis() as u64)))
@@ -240,7 +241,7 @@ impl CatchainClient {
             },
             Some(max_answer_size as i64),
             None,
-            &overlay_id
+            overlay_id
         ).await;
         log::trace!(target: Self::TARGET, "result status: {}", &result.is_ok());
         let (data, _) = result?;
@@ -299,7 +300,7 @@ impl CatchainClient {
         let result: Option<Box<Broadcast>> = None;
         let catchain_listener = catchain_listener.clone();
 
-        while let None = result {
+        while result.is_none() {
             if self.is_stop.load(atomic::Ordering::Relaxed) {
                 break;
             };
@@ -335,7 +336,7 @@ impl CatchainClient {
         let result: Option<Box<Broadcast>> = None;
         let catchain_listener = catchain_listener.clone();
 
-        while let None = result {
+        while result.is_none() {
             if self.is_stop.load(atomic::Ordering::Relaxed) {
                 break;
             };
@@ -376,7 +377,7 @@ impl CatchainClient {
         let result: Option<Box<Broadcast>> = None;
         let catchain_listener = catchain_listener.clone();
 
-        while let None = result {
+        while result.is_none() {
             if self.is_stop.load(atomic::Ordering::Relaxed) {
                 break;
             };
@@ -454,7 +455,6 @@ impl CatchainOverlay for CatchainClient {
         message: &BlockPayloadPtr,
         response_callback: ExternalQueryResponseCallback) {
             let receiver = receiver_id.clone();
-            let timeout = timeout.clone();
             let msg = message.clone();
             let overlay_id = self.overlay_id.clone();
             let overlay = self.network_context.overlay.clone();
@@ -481,7 +481,6 @@ impl CatchainOverlay for CatchainClient {
         max_answer_size: u64
     ) {
         let receiver = dst.clone();
-        let timeout = timeout.clone();
         let msg = query.clone();
         let overlay_id = self.overlay_id.clone();
         let rldp = self.network_context.rldp.clone();
@@ -517,7 +516,7 @@ impl CatchainOverlay for CatchainClient {
         self.runtime_handle.spawn(
             async move {
                 let msg = TaggedByteSlice {
-                    object: &msg.data(),
+                    object: msg.data(),
                     #[cfg(feature = "telemetry")]
                     tag: 0x80000002 // Catchain broadcast
                 };                                                         
@@ -533,11 +532,12 @@ impl CatchainOverlay for CatchainClient {
     }
 }
 
+type WorkerAwaitersPtr = Arc<lockfree::map::Map<u128, Arc<Wait<Result<Option<Answer>>>>>>;
 struct CatchainClientConsumer {
     catchain_listener: CatchainOverlayListenerPtr,
     is_stop: AtomicBool,
     overlay_id: Arc<PrivateOverlayShortId>,
-    worker_waiters: Arc<lockfree::map::Map<u128, Arc<Wait<Result<Option<Answer>>>>>>
+    worker_waiters: WorkerAwaitersPtr,
 }
 
 impl CatchainClientConsumer {
@@ -546,9 +546,9 @@ impl CatchainClientConsumer {
         catchain_listener: CatchainOverlayListenerPtr
     ) -> Self {
         Self {
-            catchain_listener: catchain_listener,
+            catchain_listener,
             is_stop: AtomicBool::new(false),
-            overlay_id: overlay_id, 
+            overlay_id, 
             worker_waiters: Arc::new(lockfree::map::Map::new())
         }
     }

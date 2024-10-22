@@ -112,12 +112,12 @@ impl PackageEntry {
         Ok(entry_header.calc_entry_size())
     }
 
-    pub const fn filename(&self) -> &String {
-        &self.filename
+    pub fn filename(&self) -> &str {
+        self.filename.as_str()
     }
 
-    pub const fn data(&self) -> &Vec<u8> {
-        &self.data
+    pub fn data(&self) -> &[u8] {
+        self.data.as_slice()
     }
 
     pub fn take_data(self) -> Vec<u8> {

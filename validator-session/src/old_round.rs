@@ -235,8 +235,8 @@ impl CacheObject<OldRoundStateImpl> for OldRoundStateImpl {
     fn compare(&self, value: &Self) -> bool {
         self.sequence_number == value.sequence_number
             && self.block == value.block
-            && &self.signatures == &value.signatures
-            && &self.approve_signatures == &value.approve_signatures
+            && self.signatures.eq(&value.signatures)
+            && self.approve_signatures.eq(&value.approve_signatures)
             && self.hash == value.hash
     }
 }
@@ -296,7 +296,7 @@ impl OldRoundStateImpl {
 
         log::trace!("...applying action on old round #{}", self.sequence_number);
 
-        let new_round_state = match message {
+        match message {
             ton::Message::ValidatorSession_Message_ApprovedBlock(message) => {
                 self.apply_approved_block_action(desc, src_idx, attempt_id, message, default_state)
             }
@@ -312,9 +312,7 @@ impl OldRoundStateImpl {
 
                 return default_state;
             }
-        };
-
-        new_round_state
+        }
     }
 
     fn apply_approved_block_action(
@@ -329,7 +327,7 @@ impl OldRoundStateImpl {
 
         log::trace!("...applying approved block action");
 
-        let candidate_id: BlockId = message.candidate.clone().into();
+        let candidate_id: BlockId = message.candidate.clone();
 
         //check if approve is received for a committed block
 
@@ -374,15 +372,13 @@ impl OldRoundStateImpl {
                 );
                 return default_state;
             }
-        } else {
-            if message.signature.len() != 0 {
-                log::warn!(
-                    "Node {} invalid APPROVE signature has been received \
-                    (expected unsigned block): {:?}",
-                    desc.get_source_public_key_hash(src_idx), message
-                );
-                return default_state;
-            }
+        } else if !message.signature.is_empty() {
+            log::warn!(
+                "Node {} invalid APPROVE signature has been received \
+                (expected unsigned block): {:?}",
+                desc.get_source_public_key_hash(src_idx), message
+            );
+            return default_state;
         }
 
         //update state
@@ -417,7 +413,7 @@ impl OldRoundStateImpl {
         //check if the node is trying to sign a block which has not been committed
 
         let block_id = self.get_block_id();
-        let candidate_id: BlockId = message.candidate.clone().into();
+        let candidate_id: BlockId = message.candidate.clone();
 
         if &candidate_id != block_id {
             log::warn!(
@@ -448,15 +444,13 @@ impl OldRoundStateImpl {
 
                 return default_state;
             }
-        } else {
-            if message.signature.len() != 0 {
-                log::warn!( 
-                    "Node {} invalid COMMIT signature has been received \
-                    (expected unsigned block): {:?}",
-                    desc.get_source_public_key_hash(src_idx), message
-                );
-                return default_state;
-            }
+        } else if !message.signature.is_empty() {
+            log::warn!( 
+                "Node {} invalid COMMIT signature has been received \
+                (expected unsigned block): {:?}",
+                desc.get_source_public_key_hash(src_idx), message
+            );
+            return default_state;
         }
 
         //check if block has been already approved
@@ -515,11 +509,11 @@ impl OldRoundStateImpl {
     ) -> Self {
         Self {
             pool: SessionPool::Temp,
-            sequence_number: sequence_number,
-            hash: hash,
-            block: block,
-            signatures: signatures,
-            approve_signatures: approve_signatures,
+            sequence_number,
+            hash,
+            block,
+            signatures,
+            approve_signatures,
             instance_counter: instance_counter.clone(),
         }
     }

@@ -79,9 +79,7 @@ impl FullNodeOverlayService {
     ) -> Result<TaggedObject<BlockDescription>> {
         let answer = match self.engine.load_block_next1(&query.prev_block) {
             Ok(id) => {
-                ton_node::blockdescription::BlockDescription{
-                    id: id.into()
-                }.into_boxed()
+                ton_node::blockdescription::BlockDescription{ id }.into_boxed()
             }
             Err(_) => BlockDescription::TonNode_BlockDescriptionEmpty
         };
@@ -276,7 +274,7 @@ impl FullNodeOverlayService {
             }
             _ => {
                 return Ok(ton_node::keyblocks::KeyBlocks {
-                    blocks: Vec::new().into(),
+                    blocks: Vec::new(),
                     incomplete: false.into(),
                     error: true.into(),
                 }.into_boxed())
@@ -340,7 +338,7 @@ impl FullNodeOverlayService {
                         let block = self.engine.load_block_raw(&next_handle).await?;
                         let proof = self.engine.load_block_proof_raw(&next_handle, has_proof_link).await?;
                         answer = DataFull {
-                            id: next_id.into(),
+                            id: next_id,
                             proof,
                             block,
                             is_link: if has_proof_link { 
@@ -815,7 +813,7 @@ impl FullNodeOverlayService {
             match query.downcast::<Q>() {
                 Ok(query) => {
                     let query_str = if log::log_enabled!(log::Level::Trace) || cfg!(feature = "telemetry") {
-                        format!("{}", std::any::type_name::<Q>())
+                        std::any::type_name::<Q>().to_string()
                     } else {
                         String::default()
                     };
@@ -865,7 +863,7 @@ impl FullNodeOverlayService {
             match query.downcast::<Q>() {
                 Ok(query) => {
                     let query_str = if log::log_enabled!(log::Level::Trace) || cfg!(feature = "telemetry") {
-                        format!("{}", std::any::type_name::<Q>())
+                        std::any::type_name::<Q>().to_string()
                     } else {
                         String::default()
                     };

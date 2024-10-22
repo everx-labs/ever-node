@@ -165,7 +165,7 @@ fn test_calculate_validators_current_mc() -> Result<()> {
     let cur_validator_set = last_mc_state_extra.config.validator_set()?;
     let v2 = prepare_validators(
         &cc_config,
-        &vec![(ShardIdent::masterchain(), 0, &cur_validator_set)]
+        &[(ShardIdent::masterchain(), 0, &cur_validator_set)]
     )?;
 
     assert_eq!(vs1, v2);
@@ -193,10 +193,8 @@ fn test_calculate_validators_next_mc() -> Result<()> {
     let next_validator_set = last_mc_state_extra.config.next_validator_set()?;
     let v2 = prepare_validators(
         &cc_config,
-        &vec![
-            (ShardIdent::masterchain(), 0, &cur_validator_set),
-            (ShardIdent::masterchain(), 1, &next_validator_set)
-        ]
+        &[(ShardIdent::masterchain(), 0, &cur_validator_set),
+            (ShardIdent::masterchain(), 1, &next_validator_set)]
     )?;
 
     assert_eq!(vs1, v2);
@@ -223,7 +221,7 @@ fn test_calculate_validators_mc_no_next_vset() -> Result<()> {
     let cur_validator_set = last_mc_state_extra.config.validator_set()?;
     let v2 = prepare_validators(
         &cc_config,
-        &vec![(ShardIdent::masterchain(), 0, &cur_validator_set)]
+        &[(ShardIdent::masterchain(), 0, &cur_validator_set)]
     )?;
 
     assert_eq!(vs1, v2);
@@ -251,7 +249,7 @@ fn test_calculate_validators_current_cc() -> Result<()> {
     let cur_validator_set = last_mc_state_extra.config.validator_set()?;
     let v2 = prepare_validators(
         &cc_config,
-        &vec![(shard, 10, &cur_validator_set)]
+        &[(shard, 10, &cur_validator_set)]
     )?;
 
     assert_eq!(vs1, v2);
@@ -280,10 +278,8 @@ fn test_calculate_validators_next_cc() -> Result<()> {
     //let next_validator_set = last_mc_state_extra.config.next_validator_set()?;
     let v2 = prepare_validators(
         &cc_config,
-        &vec![
-            (shard.clone(), 10, &cur_validator_set),
-            (shard, 11, &cur_validator_set)
-        ]
+        &[(shard.clone(), 10, &cur_validator_set),
+            (shard, 11, &cur_validator_set)]
     )?;
 
     assert_eq!(vs1, v2);
@@ -313,10 +309,8 @@ fn test_calculate_validators_next_val_set() -> Result<()> {
     let next_validator_set = last_mc_state_extra.config.next_validator_set()?;
     let v2 = prepare_validators(
         &cc_config,
-        &vec![
-            (shard.clone(), 10, &cur_validator_set),
-            (shard, 11, &next_validator_set)
-        ]
+        &[(shard.clone(), 10, &cur_validator_set),
+            (shard, 11, &next_validator_set)]
     )?;
 
     assert_eq!(vs1, v2);
@@ -345,7 +339,7 @@ fn test_calculate_validators_before_merge() -> Result<()> {
     let merged_shard = ShardIdent::with_tagged_prefix(0, 0x8000000000000000_u64)?;
     let v2 = prepare_validators(
         &cc_config,
-        &vec![(merged_shard, 11, &cur_validator_set)]
+        &[(merged_shard, 11, &cur_validator_set)]
     )?;
 
     assert_eq!(vs1, v2);
@@ -374,7 +368,7 @@ fn test_calculate_validators_before_split() -> Result<()> {
     let splitted_shard = ShardIdent::with_tagged_prefix(0, 0x2000000000000000_u64)?;
     let v2 = prepare_validators(
         &cc_config,
-        &vec![(splitted_shard, 11, &cur_validator_set)]
+        &[(splitted_shard, 11, &cur_validator_set)]
     )?;
 
     assert_eq!(vs1, v2);
@@ -407,10 +401,8 @@ fn test_calculate_validators_future_merge() -> Result<()> {
     let merged_shard = ShardIdent::with_tagged_prefix(0, 0x8000000000000000_u64)?;
     let v2 = prepare_validators(
         &cc_config,
-        &vec![
-            (shard, 10, &cur_validator_set),
-            (merged_shard, 11, &cur_validator_set)
-        ]
+        &[(shard, 10, &cur_validator_set),
+            (merged_shard, 11, &cur_validator_set)]
     )?;
 
     assert_eq!(vs1, v2);
@@ -443,10 +435,8 @@ fn test_calculate_validators_future_split() -> Result<()> {
     let splitted_shard = ShardIdent::with_tagged_prefix(0, 0x2000000000000000_u64)?;
     let v2 = prepare_validators(
         &cc_config,
-        &vec![
-            (shard, 10, &cur_validator_set),
-            (splitted_shard, 11, &cur_validator_set)
-        ]
+        &[(shard, 10, &cur_validator_set),
+            (splitted_shard, 11, &cur_validator_set)]
     )?;
 
     assert_eq!(vs1, v2);
@@ -480,14 +470,12 @@ fn test_calculate_validators_supermix() -> Result<()> {
     let splitted_shard = ShardIdent::with_tagged_prefix(0, 0x2000000000000000_u64)?;
     let v2 = prepare_validators(
         &cc_config,
-        &vec![
-            (shard.clone(), 10, &cur_validator_set),
+        &[(shard.clone(), 10, &cur_validator_set),
             (shard.clone(), 11, &cur_validator_set),
             (shard.clone(), 11, &next_validator_set),
             (splitted_shard.clone(), 11, &cur_validator_set),
             (splitted_shard.clone(), 12, &cur_validator_set),
-            (splitted_shard.clone(), 12, &next_validator_set),
-        ]
+            (splitted_shard.clone(), 12, &next_validator_set)]
     )?;
 
     assert_eq!(vs1, v2);
@@ -660,10 +648,7 @@ impl EngineOperations for TestRempClientEngine {
     fn sign_remp_receipt(&self, _receipt: &RempReceipt) -> Result<Vec<u8>> {
         const SIGNATURE_LEN: usize = 64;
         self.signed_remp_messages.fetch_add(1, Ordering::Relaxed);
-        let mut signature = vec![0; SIGNATURE_LEN];
-        for i in 0..signature.len() {
-            signature[i] = rand::random::<u8>();
-        }                                                           
+        let signature = (0..SIGNATURE_LEN).map(|_| rand::random::<u8>()).collect();
         Ok(signature)
     }
 
@@ -748,7 +733,7 @@ async fn test_remp_client() -> Result<()> {
         if seq_no == 104 {
             messages.push(msg1.clone());
         }
-        let (id, block) = prepare_block(seq_no as u32, ShardIdent::masterchain(), messages)?;
+        let (id, block) = prepare_block(seq_no, ShardIdent::masterchain(), messages)?;
         if seq_no == 104 {
             mc_block_9 = Some(block.clone());
         }
@@ -758,11 +743,11 @@ async fn test_remp_client() -> Result<()> {
         if seq_no == 103 {
             messages.push(msg2.clone());
         }
-        let (id, block) = prepare_block(seq_no as u32, ShardIdent::with_tagged_prefix(0, 0x4000000000000000_u64)?, messages)?;
+        let (id, block) = prepare_block(seq_no, ShardIdent::with_tagged_prefix(0, 0x4000000000000000_u64)?, messages)?;
         blocks.insert(id, block);
 
         let messages = vec!();
-        let (id, block) = prepare_block(seq_no as u32, ShardIdent::with_tagged_prefix(0, 0xc000000000000000_u64)?, messages)?;
+        let (id, block) = prepare_block(seq_no, ShardIdent::with_tagged_prefix(0, 0xc000000000000000_u64)?, messages)?;
         blocks.insert(id, block);
     }
 
@@ -785,7 +770,7 @@ async fn test_remp_client() -> Result<()> {
 
     remp_client.clone().process_remp_message(msg2.write_to_bytes()?, msg2_id.clone());
     
-    tokio::time::sleep(Duration::from_millis(NEXT_BLOCK_TIMEOUT * 1)).await;
+    tokio::time::sleep(Duration::from_millis(NEXT_BLOCK_TIMEOUT)).await;
     
     remp_client.clone().process_remp_message(msg1.write_to_bytes()?, msg1_id.clone());
     remp_client.clone().process_remp_message(msg3.write_to_bytes()?, msg3_id.clone());
@@ -862,6 +847,7 @@ async fn test_remp_client() -> Result<()> {
         .ok_or_else(|| error!("Can't load message {}", msg3_id))?;
     // let mut sent = false;
     assert!(m3_history.val().time_to_die.load(Ordering::Relaxed) == 0);
+    #[allow(clippy::never_loop,clippy::match_single_binding)]
     for status in m3_history.val().statuses.iter() {
         match &status.val().status() {
             // RempMessageStatus::TonNode_RempSentToValidators(_) => sent = true,

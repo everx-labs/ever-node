@@ -192,28 +192,22 @@ impl AllowStateGcSmartResolver {
                     let min_ref_mc_block = self.min_ref_mc_block.load(Ordering::Relaxed);
                     return Ok(block_id.seq_no() < min_ref_mc_block);
                 }
+            } else if let Some(kv) = self.min_actual_ss.get(block_id.shard()) {
+                let min_actual = kv.val().load(Ordering::Relaxed);
+                return Ok(block_id.seq_no() < min_actual);
             } else {
-                if let Some(kv) = self.min_actual_ss.get(block_id.shard()) {
-                    let min_actual = kv.val().load(Ordering::Relaxed);
-                    return Ok(block_id.seq_no() < min_actual);
-                } else {
-                    for kv in self.min_actual_ss.iter() {
-                        if block_id.shard().intersect_with(kv.key()) {
-                            let min_actual = kv.val().load(Ordering::Relaxed); 
-                            return Ok(block_id.seq_no() < min_actual);
-                        }
+                for kv in self.min_actual_ss.iter() {
+                    if block_id.shard().intersect_with(kv.key()) {
+                        let min_actual = kv.val().load(Ordering::Relaxed); 
+                        return Ok(block_id.seq_no() < min_actual);
                     }
                 }
             }
-        } else {
-            if !block_id.shard().is_masterchain() {
-                fail!("Non-masterchain block id is not supported for a connected network (mesh)")
-            } else {
-                if let Some(kv) = self.min_mesh_mc_block.get(&nw_id) {
-                    let min_mesh = kv.val().load(Ordering::Relaxed);
-                    return Ok(block_id.seq_no() < min_mesh);
-                }
-            }
+        } else if !block_id.shard().is_masterchain() {
+            fail!("Non-masterchain block id is not supported for a connected network (mesh)")
+        } else if let Some(kv) = self.min_mesh_mc_block.get(&nw_id) {
+            let min_mesh = kv.val().load(Ordering::Relaxed);
+            return Ok(block_id.seq_no() < min_mesh);
         }
         Ok(false)
     }

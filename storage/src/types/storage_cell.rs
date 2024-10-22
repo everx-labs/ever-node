@@ -12,7 +12,7 @@
 */
 
 use crate::{dynamic_boc_rc_db::DynamicBocDb, TARGET};
-use std::{io::Cursor, sync::{Arc,Weak, atomic::{AtomicU64, Ordering}}};
+use std::{io::Cursor, sync::{Arc, LazyLock, Weak, atomic::{AtomicU64, Ordering}}};
 use ever_block::{
     error, fail, ByteOrderRead, Cell, CellData, CellImpl, CellType, LevelMask, Result, UInt256, 
     MAX_LEVEL,
@@ -39,9 +39,7 @@ pub struct StorageCell {
     use_cache: bool,
 }
 
-lazy_static::lazy_static!{
-    static ref CELL_COUNT: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
-}
+static CELL_COUNT: LazyLock<AtomicU64> = LazyLock::new(Default::default);
 
 struct SliceReader<'a> {
     data: &'a [u8],
@@ -171,7 +169,7 @@ impl StorageCell {
         // References
         for _ in 0..references_count {
             let ref_hash = reader.read_u256()?;
-            new_data.extend_from_slice(&ref_hash.as_slice());
+            new_data.extend_from_slice(ref_hash.as_slice());
             new_data.extend_from_slice(&NOT_INITIALIZED_DEPTH.to_le_bytes());
         }
 
@@ -272,7 +270,7 @@ impl StorageCell {
                 references.push(Reference {
                     hash,
                     depth,
-                    cell: Some(Arc::downgrade(&cell.reference(i)?.cell_impl()))
+                    cell: Some(Arc::downgrade(cell.reference(i)?.cell_impl()))
                 });
             }
         }
