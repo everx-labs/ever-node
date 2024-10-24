@@ -17,10 +17,10 @@ use ton_api::ton::rpc::ton_node::PrepareBlockProof;
 
 #[test]
 pub fn test_fullnode_service_telemetry() {
-    let t = FullNodeNetworkTelemetry::new(FullNodeNetworkTelemetryKind::Client);
+    let t = FullNodeNetworkTelemetry::new_client();
     for i in 1..1000 {
         t.consumed_query(
-            format!("{}", std::any::type_name::<PrepareBlockProof>()),
+            std::any::type_name::<PrepareBlockProof>().to_string(),
             i % 5 != 0, Duration::from_millis(1 + i), (1024 + i) as usize);
     }
     let r = t.report(5);

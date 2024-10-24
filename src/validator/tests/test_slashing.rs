@@ -12,7 +12,7 @@
 */
 
 use super::*;
-use ever_crypto::KeyOption;
+use ever_block::KeyOption;
 
 fn key_from_str(key: &str) -> Arc<dyn KeyOption> {
     Ed25519KeyOption::from_public_key(key.parse::<UInt256>().unwrap().as_slice())

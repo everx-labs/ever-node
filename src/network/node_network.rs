@@ -26,7 +26,7 @@ use crate::{
 #[cfg(feature = "telemetry")]
 use crate::{
     engine_traits::EngineTelemetry, 
-    network::telemetry::{FullNodeNetworkTelemetry, FullNodeNetworkTelemetryKind}
+    network::telemetry::FullNodeNetworkTelemetry
 };
 
 use adnl::{
@@ -58,7 +58,7 @@ pub (crate) struct NetworkContext {
     pub remp: Arc<RempNode>,
     pub broadcast_hops: Option<u8>,
     #[cfg(feature = "telemetry")]
-    pub telemetry: Arc<FullNodeNetworkTelemetry>,
+    pub telemetry: FullNodeNetworkTelemetry,
     #[cfg(feature = "telemetry")]
     pub engine_telemetry: Arc<EngineTelemetry>,
     pub engine_allocated: Arc<EngineAlloc>
@@ -205,9 +205,7 @@ impl NodeNetwork {
             remp,
             broadcast_hops,
             #[cfg(feature = "telemetry")]
-            telemetry: Arc::new(
-                FullNodeNetworkTelemetry::new(FullNodeNetworkTelemetryKind::Client)
-            ),
+            telemetry: FullNodeNetworkTelemetry::new_client(),
             #[cfg(feature = "telemetry")]
             engine_telemetry,
             engine_allocated
@@ -380,7 +378,7 @@ impl NodeNetwork {
         overlay: &Arc<OverlayNode>,
         overlay_id: &Arc<OverlayShortId>
     ) -> Result<bool> {
-        match overlay.wait_for_peers(&overlay_id).await? {
+        match overlay.wait_for_peers(overlay_id).await? {
             None => Ok(false),
             Some(peers) => {
                 for peer in peers.iter() {
@@ -808,7 +806,7 @@ impl NodeNetwork {
                 if let Some(validator_set_context) = self.current_validator_set_context() {
 
                     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
-                    let connectivity_stat = &validator_set_context.val().connectivity_stat;
+                    let connectivity_stat = &validator_set_context.connectivity_stat;
                     let mut sb = string_builder::Builder::default();
                     sb.append(format!(
                         "\n{:<54} {:>10}  {:>10}",
@@ -865,7 +863,7 @@ impl NodeNetwork {
                     }
                 }
                 
-                match validator_set_context.val().connectivity_stat.get(&pub_key) {
+                match validator_set_context.connectivity_stat.get(&pub_key) {
                     Some(stat) => {
                         if broadcast.padding.len() < ConnectivityCheckBroadcastConfig::LONG_BCAST_MIN_LEN {
                             stat.val().last_short_got.store(now, Ordering::Relaxed);
@@ -911,11 +909,9 @@ impl NodeNetwork {
         &self.network_context.telemetry
     }
 
-    fn current_validator_set_context<'a>(
-        &'a self
-    ) -> Option<lockfree::map::ReadGuard<'a, UInt256, Arc<ValidatorSetContext>>>  {
+    fn current_validator_set_context(&self) -> Option<Arc<ValidatorSetContext>>  {
         let id = self.validator_context.current_set.get(&0)?;
-        self.validator_context.sets_contexts.get(id.val())
+        self.validator_context.sets_contexts.get_cloned(id.val())
     }
 
     fn connectivity_broadcasts_sender(self: Arc<Self>) {
@@ -928,7 +924,7 @@ impl NodeNetwork {
                 big_bc_counter += 1;
 
                 if let Some(validator_set_context) = self.current_validator_set_context() {
-                    let key_id = validator_set_context.val().validator_key.id().data();
+                    let key_id = validator_set_context.validator_key.id().data();
                     match self.send_connectivity_broadcast(key_id, vec!()).await {
                         Ok(info) => log::trace!("Sent short connectivity broadcast ({})", info.send_to),
                         Err(e) => log::warn!("Error while sending short connectivity broadcast: {}", e)
@@ -959,7 +955,7 @@ impl NodeNetwork {
                 .as_secs();
             padding.extend_from_slice(&now.to_le_bytes());
             let broadcast = ConnectivityCheckBroadcast {
-                pub_key: UInt256::with_array(key_id.clone()),
+                pub_key: UInt256::with_array(*key_id),
                 padding
             };
             overlay.val().overlay().broadcast(
@@ -1156,7 +1152,7 @@ impl PrivateOverlayOperations for NodeNetwork {
     async fn set_validator_list(
         &self, 
         validator_list_id: UInt256,
-        validators: &Vec<CatchainNode>
+        validators: &[CatchainNode]
     ) -> Result<Option<Arc<dyn KeyOption>>> {
         log::trace!("start set_validator_list validator_list_id: {}", &validator_list_id);
 
@@ -1255,7 +1251,7 @@ impl PrivateOverlayOperations for NodeNetwork {
                     validator_peers: peers_ids.clone(),
                     validator_key: local_validator_key.clone(),
                     validator_adnl_key: local_validator_adnl_key.clone(),
-                    election_id: election_id.clone(),
+                    election_id,
                     connectivity_stat: connectivity_stat.clone(),
                     counter: self.network_context.engine_allocated.validator_sets.clone().into()
                 };
@@ -1355,7 +1351,7 @@ impl PrivateOverlayOperations for NodeNetwork {
         &self,
         validator_list_id: UInt256,
         overlay_short_id : &Arc<PrivateOverlayShortId>,
-        nodes_public_keys : &Vec<CatchainNode>,
+        nodes_public_keys : &[CatchainNode],
         listener : CatchainOverlayListenerPtr,
         _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
         broadcast_hops: Option<usize>,
@@ -1392,8 +1388,8 @@ impl PrivateOverlayOperations for NodeNetwork {
             &self.runtime_handle,
             overlay_short_id,
             &self.network_context.overlay,
-            &client.validator_keys(),
-            &client.catchain_listener());
+            client.validator_keys(),
+            client.catchain_listener());
         Ok(client as Arc<dyn CatchainOverlay + Send>)
 
     }

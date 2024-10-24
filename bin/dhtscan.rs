@@ -152,7 +152,7 @@ fn scan_overlay(
     let mut overlays = HashMap::new();
     loop {
         let res = rt.block_on(
-            DhtNode::find_overlay_nodes_in_network(&dht, &overlay_id, &mut iter, None)
+            DhtNode::find_overlay_nodes_in_network(dht, &overlay_id, &mut iter, None)
         )?;
         let count = overlays.len();
         for (ip, node) in res {

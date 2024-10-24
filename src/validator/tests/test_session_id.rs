@@ -60,7 +60,7 @@ impl ValidatorParams {
     fn parse(parser: &LogParser) -> Self {
         let mut validators = Vec::new();
         for num in 0..parser.get_field_count("val_set") {
-            validators.push(parse_validator_descr(&parser, &format!("val_set.{}", num)));
+            validators.push(parse_validator_descr(parser, &format!("val_set.{}", num)));
         }
 
         let catchain_seqno = parser.parse_field_fromstr::<u32>("catchain_seqno");
@@ -78,7 +78,7 @@ impl ValidatorParams {
 }
 
 fn do_test_get_validator_set_id(contents: &str) {
-    let parser = LogParser::new(&contents);
+    let parser = LogParser::new(contents);
     /*
         let opts = validator_session::SessionOptions {
             catchain_idle_timeout: parse_duration(&parser, "catchain_idle_timeout"),
@@ -95,8 +95,8 @@ fn do_test_get_validator_set_id(contents: &str) {
     */
     let p = ValidatorParams::parse(&parser);
 
-    let serialized = get_session_id_serialize(p.general_session_info.clone(), &p.val_set.list().to_vec(), true);
-    let computed_id = get_session_id(p.general_session_info.clone(), &p.val_set.list().to_vec(), true);
+    let serialized = get_session_id_serialize(p.general_session_info.clone(), p.val_set.list(), true);
+    let computed_id = get_session_id(p.general_session_info.clone(), p.val_set.list(), true);
     let actual_id = UInt256::from_slice(&parser.parse_slice("group_id"));
 
     println!("Serialized: {}", hex::encode(&serialized));
@@ -117,7 +117,7 @@ fn test_session_id_normal() {
 }
 
 fn do_test_catchain_unsafe_rotate(s: &str) {
-    let parser = LogParser::new(&s);
+    let parser = LogParser::new(s);
     let p = ValidatorParams::parse(&parser);
     let prev_block = 1; //parser.parse_field_fromstr::<u32>("prev_block");
     let rotation_id = parser.parse_field_fromstr::<u32>("rotation_id");
@@ -126,13 +126,13 @@ fn do_test_catchain_unsafe_rotate(s: &str) {
     config.unsafe_catchain_rotates.insert(p.general_session_info.catchain_seqno, (prev_block, rotation_id));
 
     //let session_id = get_session_id(&p.shard, &p.val_set, &p.opts_hash, p.key_seqno, true, 0);
-    let session_id = get_session_id(p.general_session_info.clone(), &p.val_set.list().to_vec(), true);
+    let session_id = get_session_id(p.general_session_info.clone(), p.val_set.list(), true);
     let unsafe_serialized = compute_session_unsafe_serialized(&session_id, rotation_id);
     let actual_serialized = parser.parse_slice("unsafe_serialized");
 
     let unsafe_id = get_session_unsafe_id(
         p.general_session_info.clone(),
-        &p.val_set.list().to_vec(),
+        p.val_set.list(),
         true,
         Some(prev_block),
         &config

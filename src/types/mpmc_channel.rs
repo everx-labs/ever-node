@@ -45,7 +45,7 @@ impl<T> MpmcChannel<T> {
         self.in_channel.fetch_add(1, Ordering::Relaxed);
         self.queue.push(item);
         if let Some(sender) = self.sync.pop() {
-            if let Err(_) = sender.send(()) {
+            if sender.send(()).is_err() {
                 fail!("sender.send returns error");
             }
         }
@@ -62,6 +62,12 @@ impl<T> MpmcChannel<T> {
     #[cfg(feature = "telemetry")]
     pub fn len(&self) -> u32 {
         self.in_channel.load(Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "telemetry")]
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.in_channel.load(Ordering::Relaxed) == 0
     }
 
     pub async fn receive(&self) -> Result<T> {

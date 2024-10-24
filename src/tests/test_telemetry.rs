@@ -17,7 +17,7 @@ use ever_block::ShardIdent;
 
 #[test]
 pub fn test_fullnode_telemetry() {
-    let t = FullNodeTelemetry::new();
+    let t = FullNodeTelemetry::default();
     for i in 1..1000 {
         let id = BlockIdExt::with_params(
             ShardIdent::masterchain(),

@@ -24,7 +24,7 @@ impl catchain::CatchainOverlayManager for CatchainOverlayManagerImpl {
         &self,
         _local_id: &PublicKeyHash,
         overlay_short_id: &Arc<PrivateOverlayShortId>,
-        nodes: &Vec<CatchainNode>,
+        nodes: &[CatchainNode],
         listener: catchain::CatchainOverlayListenerPtr,
         replay_listener: catchain::CatchainOverlayLogReplayListenerPtr,
     ) -> Result<CatchainOverlayPtr> {

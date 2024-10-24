@@ -146,10 +146,10 @@ fn log_fast_session() {
     //init logger
 
     let datetime: chrono::DateTime<chrono::offset::Utc> =
-        std::time::SystemTime::now().clone().into();
+        std::time::SystemTime::now().into();
     let out_log_file_name = format!(
         "debug-{}.log",
-        datetime.format("%Y-%m-%d-%H.%M.%S").to_string()
+        datetime.format("%Y-%m-%d-%H.%M.%S")
     );
     let logs_path = Path::new("..").join("target").join("logs");
     std::fs::create_dir_all(logs_path.as_path())
@@ -194,7 +194,7 @@ fn log_fast_session() {
                 message
             );
 
-            file.write_all(&log_line.as_bytes())?;
+            file.write_all(log_line.as_bytes())?;
             file.write_all(b"\n")?;
 
             let (message, level) = match record.level() {
@@ -247,10 +247,11 @@ fn log_fast_session() {
         .map(char::from)
         .collect();
     let db_path = format!("../target/catchains/log_replay {}", rand_name);    
-    let session_id: SessionId = UInt256::default();
-    let mut session_opts = SessionOptions::default();
-
-    session_opts.skip_single_node_session_validations = true; //disable all validations
+    let session_id = UInt256::default();
+    let session_opts = SessionOptions {
+        skip_single_node_session_validations: true, //disable all validations
+        ..Default::default()
+    };
 
     let listener = Arc::new(DummySessionListener {
         public_key: local_key.clone(),
@@ -275,5 +276,5 @@ fn log_fast_session() {
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    assert!(listener.validation_request.load(Ordering::Relaxed) == false);
+    assert!(!listener.validation_request.load(Ordering::Relaxed));
 }

@@ -436,7 +436,7 @@ fn search_last_mc_blocks(
     db.next1_block_db.for_each(&mut |_key, val| {
         check_stop()?;
         let id = BlockIdExt::deserialize(&mut Cursor::new(val))?;
-        if id.shard().workchain_id() == MASTERCHAIN_ID && id.seq_no() as u32 > last_mc_block.seq_no() {
+        if id.shard().workchain_id() == MASTERCHAIN_ID && id.seq_no() > last_mc_block.seq_no() {
             last_mc_block = id;
         }
         Ok(true)
@@ -452,7 +452,7 @@ fn search_last_mc_blocks(
         check_stop()?;
         let id = BlockIdExt::deserialize(&mut Cursor::new(val))?;
         if id.shard().workchain_id() == MASTERCHAIN_ID 
-            && id.seq_no() as u32 + LAST_MC_BLOCKS >= last_mc_block.seq_no() {
+            && id.seq_no() + LAST_MC_BLOCKS >= last_mc_block.seq_no() {
             last_mc_blocks.push(id);
         }
         Ok(true)
@@ -487,12 +487,10 @@ async fn check_one_block(
             handle.set_proof();
             db.store_block_handle(&handle, None)?;
         }
-    } else {
-        if !handle.has_proof_link() {
-            log::warn!("Block {} has handle.has_proof_or_link() false", id);
-            handle.set_proof_link();
-            db.store_block_handle(&handle, None)?;
-        }
+    } else if !handle.has_proof_link() {
+        log::warn!("Block {} has handle.has_proof_or_link() false", id);
+        handle.set_proof_link();
+        db.store_block_handle(&handle, None)?;
     }
 
     if !handle.is_applied() {
@@ -607,7 +605,7 @@ async fn calc_min_mc_state_id(
         || error!("INTERNAL ERROR: No PSS keeper MC block id when apply block")
     )?;
     let mut min_id: &BlockIdExt = if shard_client_mc_block_id.seq_no() < pss_keeper.seq_no() { 
-        &shard_client_mc_block_id
+        shard_client_mc_block_id
     } else { 
         &pss_keeper
     };
@@ -615,7 +613,7 @@ async fn calc_min_mc_state_id(
     if let Some(id) = &last_rotation_block_id {
         if id.seq_no() < min_id.seq_no() {
             if min_id.seq_no() - id.seq_no() < 10000 {
-                min_id = &id;
+                min_id = id;
             } else {
                 db.drop_validator_state(LAST_ROTATION_MC_BLOCK)?;
             }
@@ -628,7 +626,7 @@ async fn calc_min_mc_state_id(
         min_id = &archives_gc;
     }
 
-    let handle = db.load_block_handle(&min_id)?
+    let handle = db.load_block_handle(min_id)?
         .ok_or_else(|| error!("there is no handle for block {}", min_id))?;
     let block = db.load_block_data(&handle).await?;
     let min_ref_mc_seqno = block.block()?.read_info()?.min_ref_mc_seqno();
@@ -652,7 +650,7 @@ async fn restore_states(
     }
 
     // create list of mc and shard ids by min_mc_state_id
-    let min_mc_handle = db.load_block_handle(&min_mc_state_id)?
+    let min_mc_handle = db.load_block_handle(min_mc_state_id)?
         .ok_or_else(|| error!("there is no handle for block {}", min_mc_state_id))?;
     let min_mc_block = db.load_block_data(&min_mc_handle).await?;
     let mut min_stored_states = min_mc_block.shard_hashes()?.top_blocks(&[processed_wc])?;

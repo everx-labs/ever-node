@@ -48,10 +48,10 @@ async fn test_dynamic_boc_rc_db() -> Result<()> {
     let root_cell = get_test_tree_of_cells();
     let mut cells_counters = Some(fnv::FnvHashMap::default());
 
-    assert!(boc_db.len() == 0);
+    assert!(boc_db.count() == 0);
     let initial_cell_count = count_tree_unique_cells(root_cell.clone());
     boc_db.save_boc(root_cell.clone(), true, &|| Ok(()), &mut cells_counters, false)?;
-    assert_eq!(boc_db.len(), initial_cell_count);
+    assert_eq!(boc_db.count(), initial_cell_count);
 
     let loaded_boc = boc_db.load_boc(&root_cell.repr_hash(), true)?;
     let fetched_count = count_tree_unique_cells(loaded_boc.clone());
@@ -62,10 +62,10 @@ async fn test_dynamic_boc_rc_db() -> Result<()> {
     boc_db.save_boc(root_cell_2.clone(), true, &|| Ok(()), &mut cells_counters, false)?;
 
     boc_db.delete_boc(&root_cell.repr_hash(), &|| Ok(()), &mut cells_counters, false)?;
-    assert!(boc_db.len() > 0);
+    assert!(boc_db.count() > 0);
 
     boc_db.delete_boc(&root_cell_2.repr_hash(), &|| Ok(()), &mut cells_counters, false)?;
-    assert_eq!(boc_db.len(), 0);
+    assert_eq!(boc_db.count(), 0);
 
     drop(boc_db);
     drop(db);

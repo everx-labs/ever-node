@@ -14,7 +14,7 @@
 use crate::{
     block::BlockStuff, block_proof::BlockProofStuff, 
     config::{CollatorConfig, CollatorTestBundlesGeneralConfig, TonNodeConfig},
-    engine::{EngineFlags, now_duration}, internal_db::BlockResult,
+    engine::{now_duration, EngineFlags, SplitQueues}, internal_db::BlockResult,
     network::{control::ControlServer, full_node_client::FullNodeOverlayClient},
     shard_state::ShardStateStuff, shard_states_keeper::PinnedShardStateGuard,
     types::top_block_descr::{TopBlockDescrStuff, TopBlockDescrId},
@@ -123,7 +123,7 @@ pub trait PrivateOverlayOperations: Sync + Send {
     async fn set_validator_list(
         &self, 
         validator_list_id: UInt256,
-        validators: &Vec<CatchainNode>
+        validators: &[CatchainNode]
     ) -> Result<Option<Arc<dyn KeyOption>>>;
 
     fn activate_validator_list(&self, validator_list_id: UInt256) -> Result<()>;
@@ -136,7 +136,7 @@ pub trait PrivateOverlayOperations: Sync + Send {
         &self,
         validator_list_id: UInt256,
         overlay_short_id : &Arc<PrivateOverlayShortId>,
-        nodes_public_keys : &Vec<CatchainNode>,
+        nodes_public_keys : &[CatchainNode],
         listener : CatchainOverlayListenerPtr,
         _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
         broadcast_hops: Option<usize>,
@@ -204,7 +204,7 @@ pub trait EngineOperations : Sync + Send {
     async fn set_validator_list(
         &self, 
         validator_list_id: UInt256,
-        validators: &Vec<CatchainNode>
+        validators: &[CatchainNode]
     ) -> Result<Option<Arc<dyn KeyOption>>> {
         unimplemented!()
     }
@@ -233,7 +233,7 @@ pub trait EngineOperations : Sync + Send {
         &self,
         validator_list_id: UInt256,
         overlay_short_id : &Arc<PrivateOverlayShortId>,
-        nodes_public_keys : &Vec<CatchainNode>,
+        nodes_public_keys : &[CatchainNode],
         listener : CatchainOverlayListenerPtr,
         _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
         broadcast_hops: Option<usize>,
@@ -481,7 +481,7 @@ pub trait EngineOperations : Sync + Send {
     #[cfg(feature = "external_db")]
     async fn process_shard_hashes_in_ext_db(
         &self,
-        shard_hashes: &Vec<BlockIdExt>)
+        shard_hashes: &[BlockIdExt])
     -> Result<()> {
         unimplemented!()
     }
@@ -937,10 +937,7 @@ pub trait EngineOperations : Sync + Send {
         unimplemented!();
     }
 
-    fn get_split_queues(
-        &self,
-        before_split_block: &BlockIdExt
-    ) -> Option<(OutMsgQueue, OutMsgQueue, HashSet<UInt256>)> {
+    fn get_split_queues(&self, before_split_block: &BlockIdExt) -> SplitQueues {
         unimplemented!();
     }
 

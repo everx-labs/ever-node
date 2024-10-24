@@ -2,27 +2,29 @@
 build = '../common/build/build.rs'
 edition = '2021'
 name = 'validator_session'
-version = '0.0.2'
+version = '0.0.3'
 
 [dependencies]
 anyhow = '1.0'
 backtrace = '0.3'
-crossbeam = '0.7'
+crossbeam = '0.8'
 hex = '0.4'
 lazy_static = '1.4'
 log = '0.4'
-metrics = '0.21.0'
+metrics = '0.21'
+num-derive = '0.4'
+num-traits = '0.2'
 rand = '0.8'
-adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.11.25' }
+adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.11.30' }
 catchain = { path = '../catchain' }
-ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.11.17' }
+ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.11.20' }
 storage = { path = '../storage' }
-ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.4.24' }
+ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.4.29' }
 
 [dev-dependencies]
 chrono = '0.4'
 colored = '1.9'
-env_logger = '0.7'
+env_logger = '0.11'
 
 [features]
 export_key = [  ]

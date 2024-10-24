@@ -11,7 +11,10 @@
 * limitations under the License.
 */
 
-use crate::engine_traits::EngineAlloc;
+use crate::{
+    error::NodeError,
+    engine_traits::EngineAlloc,
+};
 #[cfg(feature = "telemetry")]
 use crate::engine_traits::EngineTelemetry;
 use std::{
@@ -156,7 +159,7 @@ impl<I, R> AwaitersPool<I, R> where
                 return Ok(None)
             } else if let Some(timeout_ms) = timeout_ms {
                 tokio::time::timeout(Duration::from_millis(timeout_ms), rx.changed()).await
-                    .map_err(|_| error!("{}: timeout {}", self.description, id))?
+                    .map_err(|_| NodeError::Timeout(format!("{}: timeout {}", self.description, id)))?
             } else {
                 rx.changed().await
             };

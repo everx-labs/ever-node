@@ -88,6 +88,7 @@ impl KafkaConsumer {
             };
             consumer.commit_message(&borrowed_message, rdkafka::consumer::CommitMode::Async)?;
             log::trace!("Processed record, {}, time: {} mcs", message_descr, now.elapsed().as_micros());
+
         }
 
         Ok(())

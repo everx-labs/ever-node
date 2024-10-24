@@ -100,7 +100,7 @@ impl BlockStuff {
             fail!("wrong root hash for {}", id)
         }
         let block = BlockOrigin::Block(Block::construct_from_cell(root.clone())?);
-        Ok(Self { id, block, root, data, ..Default::default() })
+        Ok(Self { id, block, root, data })
     }
 
     pub fn deserialize_queue_update(
@@ -120,7 +120,7 @@ impl BlockStuff {
             queue_update_for,
             empty
         };
-        Ok(Self { id, block, root, data, ..Default::default() })
+        Ok(Self { id, block, root, data })
     }
 
     pub fn deserialize_mesh_update(
@@ -138,7 +138,7 @@ impl BlockStuff {
             shard: &ShardIdent,
         ) -> Result<bool> {
             if nw_descr.out_queue_update.new_hash != nw_descr.out_queue_update.old_hash {
-                let update = mesh_update.queue_updates.get_queue_update(&shard)?
+                let update = mesh_update.queue_updates.get_queue_update(shard)?
                     .ok_or_else(|| error!("Can't load update from shard {} block {} {}",
                         shard, nw_id, id))?;
                 if update.old_hash != nw_descr.out_queue_update.old_hash {
@@ -198,7 +198,7 @@ impl BlockStuff {
             queue_updates: mesh_update.queue_updates,
             network_id: nw_id,
         };
-        let block_stuff = Self { id, block, root, data, ..Default::default() };
+        let block_stuff = Self { id, block, root, data };
 
         let proof = BlockProof {
             proof_for: block_stuff.id.clone(),
@@ -272,7 +272,7 @@ impl BlockStuff {
             queues: mesh_kit.queues,
             network_id: nw_id,
         };
-        let block_stuff = Self { id, block, root, data, ..Default::default() };
+        let block_stuff = Self { id, block, root, data };
 
         let proof = BlockProof {
             proof_for: block_stuff.id.clone(),
@@ -296,7 +296,7 @@ impl BlockStuff {
             root_hash: root.repr_hash(),
             file_hash,
         };
-        Ok(Self { id, block: BlockOrigin::Block(block), root, data: Arc::new(data), ..Default::default() })
+        Ok(Self { id, block: BlockOrigin::Block(block), root, data: Arc::new(data) })
     }
 
     #[cfg(test)]
@@ -312,7 +312,8 @@ impl BlockStuff {
             root_hash: root.repr_hash(),
             file_hash,
         };
-        Ok(Self { id, block: BlockOrigin::Block(block), root, data, ..Default::default() })
+        let block = BlockOrigin::Block(block);
+        Ok(Self { id, block, root, data })
     }
 
     #[cfg(test)]
@@ -336,7 +337,6 @@ impl BlockStuff {
             block: BlockOrigin::Block(block),
             root: Cell::default(),
             data: Arc::new(vec!(0xfe; 10_000)),
-            ..Default::default()
         })
     }
 
@@ -506,7 +506,7 @@ impl BlockStuff {
     }
 
     pub fn write_to<T: Write>(&self, dst: &mut T) -> Result<()> {
-        dst.write(&self.data)?;
+        dst.write_all(&self.data)?;
         Ok(())
     }
 
@@ -725,8 +725,7 @@ pub fn construct_and_check_prev_stuff(
     let out_after_split = info.after_split();
 
     let mut out_prev = vec!();
-    let prev_seqno;
-    match info.read_prev_ref()? {
+    let prev_seqno = match info.read_prev_ref()? {
         BlkPrevInfo::Block { prev } => {
             out_prev.push(BlockIdExt {
                 shard_id: if info.after_split() { info.shard().merge()? } else { info.shard().clone() },
@@ -734,7 +733,7 @@ pub fn construct_and_check_prev_stuff(
                 root_hash: prev.root_hash,
                 file_hash: prev.file_hash,
             });
-            prev_seqno = prev.seq_no;
+            prev.seq_no
         }
         BlkPrevInfo::Blocks { prev1, prev2 } => {
             if info.after_split() {
@@ -758,9 +757,9 @@ pub fn construct_and_check_prev_stuff(
                 root_hash: prev2.root_hash,
                 file_hash: prev2.file_hash,
             });
-            prev_seqno = max(prev1.seq_no, prev2.seq_no);
+            max(prev1.seq_no, prev2.seq_no)
         }
-    }
+    };
 
     if id.seq_no() != prev_seqno + 1 {
         fail!(

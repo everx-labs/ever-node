@@ -21,7 +21,7 @@ use ever_block::{
 use ever_block_json::parse_state;
 
 fn import_zerostate(json: &str) -> Result<ShardStateUnsplit> {
-    let map = serde_json::from_str::<Map<String, Value>>(&json)?;
+    let map = serde_json::from_str::<Map<String, Value>>(json)?;
     let mut mc_zero_state = parse_state(&map)?;
     let now = mc_zero_state.gen_time();
     // let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as u32;
@@ -81,7 +81,7 @@ fn write_zero_state(mc_zero_state: ShardStateUnsplit) -> Result<()> {
     }).expect("something wrong with config");
     let prices = extra.config.storage_prices().expect("prices weren't read from config");
     for i in 0..prices.len().expect("prices len wasn't read") as u32 {
-        prices.get(i).expect(&format!("prices description {} wasn't read", i));
+        prices.get(i).unwrap_or_else(|_| panic!("prices description {} wasn't read", i));
     }
 
     let json = serde_json::json!({
@@ -90,7 +90,7 @@ fn write_zero_state(mc_zero_state: ShardStateUnsplit) -> Result<()> {
             "shard": -9223372036854775808i64,
             "seqno": 0,
             "root_hash": base64_encode(cell.repr_hash().as_slice()),
-            "file_hash": base64_encode(&file_hash.as_slice()),
+            "file_hash": base64_encode(file_hash.as_slice()),
         }
     });
 

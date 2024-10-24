@@ -38,7 +38,7 @@ impl BlockLimitStatus {
             gas_used: 0,
             limits,
             lt_current: 0,
-            lt_start: std::u64::MAX,
+            lt_start: u64::MAX,
             in_msgs: 0,
             out_msgs: 0,
             removed_split_msgs: 0,
@@ -171,7 +171,7 @@ impl BlockLimitStatus {
     }
 
     fn lt_delta(&self) -> u32 {
-        self.lt_current.checked_sub(self.lt_start).unwrap_or(0) as u32
+        self.lt_current.saturating_sub(self.lt_start) as u32
     }
 /*
     pub fn dump_block_size(&self) {

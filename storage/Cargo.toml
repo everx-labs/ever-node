@@ -1,43 +1,42 @@
 [package]
 edition = '2021'
 name = 'storage'
-version = '0.6.0'
+version = '0.6.1'
 
 [dependencies]
 ahash = '0.8'
 anyhow = '1.0'
-async-trait = '0.1.31'
-bytes = '1.1.0'
-fnv = '1.0.6'
-futures = '0.3.4'
+async-trait = '0.1'
+bytes = '1.1'
+fnv = '1.0'
+futures = '0.3'
 hex = '0.4'
-lazy_static = '1.4.0'
 log = '0.4'
 log4rs = '1.2'
-lru = '0.11.0'
-metrics = '0.21.1'
-parking_lot = '0.12.1'
-quick_cache = '0.4.0'
+lru = '0.11'
+metrics = '0.21'
+parking_lot = '0.12'
+quick_cache = '0.4'
 rand = { features = [ 'small_rng' ], version = '0.8' }
 rocksdb = '0.22'
-serde = '1.0.114'
-serde_cbor = '0.11.1'
-serde_derive = '1.0.114'
-strum = '0.18.0'
-strum_macros = '0.18.0'
+serde = '1.0'
+serde_cbor = '0.11'
+serde_derive = '1.0'
+strum = '0.18'
+strum_macros = '0.18'
 thiserror = '1.0'
 tokio = { features = [ 'fs', 'rt-multi-thread' ], version = '1.5' }
 tokio-util = '0.7'
-adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.11.25' }
-ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.11.17' }
+adnl = { git = 'https://github.com/everx-labs/ever-adnl.git', tag = '0.11.30' }
+ever_block = { git = 'https://github.com/everx-labs/ever-block.git', tag = '1.11.20' }
 lockfree = { git = 'https://github.com/everx-labs/lockfree.git' }
-ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.4.24' }
+ton_api = { git = 'https://github.com/everx-labs/ever-tl.git', package = 'ton_api', tag = '0.4.29' }
 
 [build-dependencies]
 cc = { features = [ 'parallel' ], version = '1.0.61' }
 
 [dev-dependencies]
-zip = '0.5'
+zip = '2.2'
 
 [features]
 default = [  ]

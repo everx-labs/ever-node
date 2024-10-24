@@ -403,7 +403,7 @@ pub fn create_ext_message(data: &[u8]) -> Result<(UInt256, Message)> {
         fail!("External message is too large: {}", data.len())
     }
 
-    let read_result = read_boc(&data)?;
+    let read_result = read_boc(data)?;
     if read_result.header.big_cells_count > 0 {
         fail!("External message contains big cells")
     }
@@ -449,10 +449,7 @@ pub fn get_level_numeric_value(lvl: &RempMessageLevel) -> i32 {
 
 /// A message with "rejected" status or a timed-out message are finally rejected
 pub fn is_finally_rejected(status: &RempMessageStatus) -> bool {
-    match status {
-        RempMessageStatus::TonNode_RempRejected(_) | RempMessageStatus::TonNode_RempTimeout => true,
-        _ => false
-    }
+    matches!(status, RempMessageStatus::TonNode_RempRejected(_) | RempMessageStatus::TonNode_RempTimeout)
 }
 
 pub fn is_finally_accepted(status: &RempMessageStatus) -> bool {

@@ -17,6 +17,7 @@ use std::{sync::Arc, collections::HashSet};
 use ever_block::BlockIdExt;
 use ever_block::{error, fail, KeyId, Result};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn download_persistent_state(
     id: &BlockIdExt,
     msg_queue_for: Option<i32>,
@@ -46,6 +47,7 @@ pub async fn download_persistent_state(
     result.ok_or_else(|| error!("internal error!"))?
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_persistent_state_iter(
     id: &BlockIdExt,
     msg_queue_for: Option<i32>,

@@ -149,7 +149,7 @@ impl ShardStateStuff {
         if block_id.seq_no() != 0 {
             fail!("Given block id has non-zero seq number");
         }        
-        let file_hash = UInt256::calc_file_hash(&bytes);
+        let file_hash = UInt256::calc_file_hash(bytes);
         if file_hash != block_id.file_hash {
             fail!("Wrong zero state's {} file hash", block_id);
         }
@@ -312,7 +312,7 @@ impl ShardStateStuff {
 
     pub fn root_cell(&self) -> &Cell { &self.root }
 
-    pub fn shard(&self) -> &ShardIdent { &self.block_id.shard() }
+    pub fn shard(&self) -> &ShardIdent { self.block_id.shard() }
 
     pub fn top_blocks(&self, workchain_id: i32) -> Result<Vec<BlockIdExt>> {
         self.shard_hashes()?.top_blocks(&[workchain_id])
@@ -454,11 +454,11 @@ impl ShardStateStuff {
         telemetry: &Arc<EngineTelemetry>,
         allocated: &Arc<EngineAlloc>
     ) -> Result<Arc<Self>> {
-        let mut bytes = std::fs::read(filename)?;
+        let bytes = std::fs::read(filename)?;
         match id.seq_no() {
             0 => Self::deserialize_zerostate(
                 id, 
-                &mut bytes,
+                &bytes,
                 #[cfg(feature = "telemetry")]
                 telemetry,
                 allocated

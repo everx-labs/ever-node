@@ -68,9 +68,9 @@ impl Randbuf {
 }
 */
 
-pub fn secure_bytes(mut orig: &mut Vec<u8>, size: usize) {
-    orig.resize(size, 0 as u8);
-    rand_bytes(&mut orig).unwrap();
+pub fn secure_bytes(orig: &mut Vec<u8>, size: usize) {
+    orig.resize(size, 0);
+    rand_bytes(orig).unwrap();
 }
 
 pub fn secure_256_bits() -> [u8; 32] {

@@ -75,7 +75,7 @@ impl SessionValidatorsInfo {
     }
 
     pub fn shard (&self) -> ShardIdent {
-        return self.general_info.shard.clone()
+        self.general_info.shard.clone()
     }
 }
 
@@ -90,7 +90,7 @@ impl Display for SessionValidatorsInfo {
 
 impl PartialEq<Self> for SessionValidatorsInfo {
     fn eq(&self, other: &Self) -> bool {
-        return self.general_info == other.general_info &&
+        self.general_info == other.general_info &&
             self.session_id == other.session_id &&
             self.validator_set == other.validator_set
     }
@@ -101,6 +101,12 @@ impl Eq for SessionValidatorsInfo {}
 #[derive(PartialEq, Eq)]
 pub struct SessionValidatorsList {
     sessions: HashMap<ShardIdent, Arc<SessionValidatorsInfo>>
+}
+
+impl Default for SessionValidatorsList {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SessionValidatorsList {
@@ -147,7 +153,7 @@ impl SessionValidatorsList {
     }
 
     pub fn get_maximal_cc_seqno (&self) -> Option<u32> {
-        self.sessions.iter().map(|(_shard,info)| info.general_info.catchain_seqno).max()
+        self.sessions.values().map(|info| info.general_info.catchain_seqno).max()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -157,15 +163,23 @@ impl SessionValidatorsList {
 
 impl Display for SessionValidatorsList {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SessionValidatorsList: [{}]", self.sessions.iter().map(
-            |(shard,session)| format!(" {}: {} ", shard, session)
-        ).collect::<String>())
+        write!(f, "SessionValidatorsList: [")?;
+        for (shard, session) in &self.sessions {
+            write!(f, " {}: {} ", shard, session)?;
+        }
+        write!(f, "]")
     }
 }
 
 pub struct SessionValidatorsCache {
     session_info: DashMap<(ShardIdent, u32), Arc<SessionValidatorsInfo>>,
     session_prev_list: DashMap<(ShardIdent, u32), Arc<SessionValidatorsList>>
+}
+
+impl Default for SessionValidatorsCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SessionValidatorsCache {

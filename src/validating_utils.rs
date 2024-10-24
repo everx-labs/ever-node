@@ -65,13 +65,14 @@ pub fn supported_version() -> u32 {
     59
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn check_this_shard_mc_info(
     shard: &ShardIdent,
     block_id: &BlockIdExt,
     after_merge: bool,
     after_split: bool,
     mut before_split: bool,
-    prev_blocks: &Vec<BlockIdExt>,
+    prev_blocks: &[BlockIdExt],
     config_params: &ConfigParams,
     mc_state_extra: &McStateExtra,
     is_validate: bool,
@@ -261,7 +262,7 @@ pub fn check_cur_validator_set(
     let cc_seqno_from_state = if shard.is_masterchain() {
         mc_state_extra.validator_info.catchain_seqno
     } else {
-        old_mc_shards.calc_shard_cc_seqno(&shard)?
+        old_mc_shards.calc_shard_cc_seqno(shard)?
     };
     let nodes = compute_validator_set_cc(
         mc_state,
@@ -295,7 +296,7 @@ pub fn check_cur_validator_set(
 pub fn may_update_shard_block_info(
     shards: &ShardHashes,
     new_info: &McShardRecord,
-    old_blkids: &Vec<BlockIdExt>,
+    old_blkids: &[BlockIdExt],
     lt_limit: u64,
     shards_updated: Option<&HashSet<ShardIdent>>,
 ) -> Result<(bool, Option<McShardRecord>)> {
@@ -468,7 +469,7 @@ pub fn may_update_shard_block_info(
     }
 
     log::trace!("after may_update_shard_block_info new_info.block_id(): {}", new_info.block_id());
-    return Ok((!before_split, ancestor))
+    Ok((!before_split, ancestor))
 }
 
 pub fn calc_remp_msg_ordering_hash<'a>(msg_id: &UInt256, prev_blocks_ids: impl Iterator<Item = &'a BlockIdExt>) -> UInt256 {

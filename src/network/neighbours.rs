@@ -103,7 +103,7 @@ impl Neighbour {
         } else if (version == PROTOCOL_VERSION) && (capabilities < PROTOCOL_CAPABILITIES) {
             unr += 2;
         }
-        return unr;
+        unr
     }
 
     pub fn is_good(&self) -> bool {
@@ -111,8 +111,8 @@ impl Neighbour {
     }
 
     pub fn update_proto_version(&self, q: &Capabilities) {
-        self.proto_version.store(q.version().clone(), Ordering::Relaxed);
-        self.capabilities.store(q.capabilities().clone(), Ordering::Relaxed);
+        self.proto_version.store(*q.version(), Ordering::Relaxed);
+        self.capabilities.store(*q.capabilities(), Ordering::Relaxed);
     }
 
     pub fn id(&self) -> &Arc<KeyId> {
@@ -224,7 +224,7 @@ impl Neighbours {
     const TIMEOUT_RANDOM_PEERS: Duration = Duration::from_millis(1000);
 
     pub fn new(
-        start_peers: &Vec<Arc<KeyId>>,
+        start_peers: &[Arc<KeyId>],
         dht: &Arc<DhtNode>,
         network_id: Option<i32>,
         overlay: &Arc<OverlayNode>,
@@ -318,21 +318,19 @@ impl Neighbours {
             if count == MAX_NEIGHBOURS {
                 let mut cur_worst: Option<Arc<Neighbour>> = None;
                 let mut cur_rand:  Option<Arc<Neighbour>> = None;
-                let mut cnt: u32 = 0;
                 let mut u:i32 = 0;
 
                 // Iteration by active peers to find both worst unreliability peer 
                 // and random peer to replace
-                for current in self.peers.get_iter() {
+                for (cnt, current) in self.peers.get_iter().enumerate() {
                     let un = current.effective_unreliability();
                     if un > u {
                         u = un;
                         cur_worst = Some(current.clone());
                     }
-                    if cnt == 0 || rng.gen_range(0, cnt) == 0 {
+                    if cnt == 0 || rng.gen_range(0..cnt) == 0 {
                         cur_rand = Some(current.clone());
                     }
-                    cnt += 1;
                 }
                 let mut deleted_peer = cur_rand;
 
@@ -380,7 +378,7 @@ impl Neighbours {
             async move {
                 loop {
                     let sleep_time = rand::thread_rng().gen_range(
-                        Self::TIMEOUT_RELOAD_MIN_SEC,
+                        Self::TIMEOUT_RELOAD_MIN_SEC..
                         Self::TIMEOUT_RELOAD_MAX_SEC
                     );
                     tokio::time::sleep(Duration::from_secs(sleep_time)).await;
@@ -418,7 +416,7 @@ impl Neighbours {
                 loop {
                     for peer in self.peers.get_iter() {
                         match self.overlay.get_random_peers(
-                            &peer.id(),
+                            peer.id(),
                             &self.overlay_id,
                             None
                         ).await {
@@ -538,7 +536,7 @@ impl Neighbours {
                 fines_points
             );
             if unr <= FAIL_UNRELIABILITY {
-                if node_stat + (node_stat * 0.2 as f64) < peer_stat {
+                if node_stat * 1.2 < peer_stat {
                     if fines_points > 0 {
                         let _ = neighbour.fines_points.fetch_update(
                             Ordering::Relaxed,
@@ -557,7 +555,7 @@ impl Neighbours {
                 let w = (1 << (FAIL_UNRELIABILITY - unr)) as i64;
                 sum += w;
 
-                if rng.gen_range(0, sum) < w {
+                if rng.gen_range(0..sum) < w {
                     best = Some(neighbour.clone());
                 }
             }
@@ -583,19 +581,19 @@ impl Neighbours {
         } else {
             neighbour.query_failed(roundtrip, update_flag & UPDATE_FLAG_IS_RDPL > 0);
         }
-        if update_flag & UPDATE_FLAG_IS_REGISTER > 0 {
+        if update_flag & UPDATE_FLAG_IS_REGISTER != 0 {
             neighbour.all_attempts.fetch_add(1, Ordering::Relaxed);
             if update_flag & UPDATE_FLAG_IS_REG_IN_COMMON_STAT > 0 {
                 self.all_attempts.fetch_add(1, Ordering::Relaxed);
             }
-            if !(update_flag & UPDATE_FLAG_SUCCESS >0) {
+            if update_flag & UPDATE_FLAG_SUCCESS == 0 {
                 neighbour.fail_attempts.fetch_add(1, Ordering::Relaxed);
-                if update_flag & UPDATE_FLAG_IS_REG_IN_COMMON_STAT > 0 {
+                if update_flag & UPDATE_FLAG_IS_REG_IN_COMMON_STAT != 0 {
                     self.fail_attempts.fetch_add(1, Ordering::Relaxed);
                 }
             }
             if neighbour.active_check.load(Ordering::Relaxed) {
-                if !(update_flag & UPDATE_FLAG_SUCCESS > 0) {
+                if update_flag & UPDATE_FLAG_SUCCESS == 0 {
                     neighbour.fines_points.fetch_add(FINES_POINTS_COUNT, Ordering::Relaxed);
                 }
                 neighbour.active_check.store(false, Ordering::Relaxed);
@@ -738,7 +736,7 @@ pub struct NeighboursCache {
 }
 
 impl NeighboursCache {
-    pub fn new(start_peers: &Vec<Arc<KeyId>>, default_rldp_roundtrip: u32) -> Result<Self> {
+    pub fn new(start_peers: &[Arc<KeyId>], default_rldp_roundtrip: u32) -> Result<Self> {
         let cache = NeighboursCacheCore::new(start_peers, default_rldp_roundtrip)?;
         Ok(NeighboursCache {cache: Arc::new(cache)})
     }
@@ -793,7 +791,7 @@ struct NeighboursCacheCore {
 
 impl NeighboursCacheCore {
     
-    pub fn new(start_peers: &Vec<Arc<KeyId>>, default_rldp_roundtrip: u32) -> Result<Self> {
+    pub fn new(start_peers: &[Arc<KeyId>], default_rldp_roundtrip: u32) -> Result<Self> {
         let instance = NeighboursCacheCore {
             count: AtomicU32::new(0),
             next: AtomicU32::new(0),
@@ -806,7 +804,7 @@ impl NeighboursCacheCore {
         for peer in start_peers.iter() {
             if index < MAX_NEIGHBOURS {
                 instance.insert(peer.clone(), None)?;
-                index = index + 1;
+                index += 1;
             }
         }
 
@@ -831,13 +829,7 @@ impl NeighboursCacheCore {
     }
 
     pub fn get(&self, peer: &Arc<KeyId>) -> Option<Arc<Neighbour>> {
-        let result = if let Some (result) = &self.values.get(peer) {
-            Some(result.val().clone())
-        } else {
-            None
-        };
-
-        result
+        self.values.get_cloned(peer)
     }
 
     pub fn next_for_ping(&self, start: &Instant) -> (Option<Arc<Neighbour>>, u64) {
@@ -964,7 +956,7 @@ impl NeighboursCacheCore {
     fn get_index(&self, peer: &Arc<KeyId>) -> Option<u32> {
         for index in self.indices.iter() {
             if index.1.cmp(peer) == std::cmp::Ordering::Equal {
-                return Some(index.0.clone())
+                return Some(index.0)
             }
         }
         None
@@ -981,7 +973,7 @@ impl NeighboursCacheIterator {
     fn new(parent: Arc<NeighboursCacheCore>) -> Self {
         NeighboursCacheIterator {
             current: -1,
-            parent: parent,
+            parent,
         }
     }
 }
@@ -1084,7 +1076,7 @@ impl ReserveNeighbours {
                 idx = cur_idx;
             }
         }
-        return (rv, if idx > 0 { idx - 1 } else { 0 } );
+        (rv, if idx > 0 { idx - 1 } else { 0 } )
     }
 
     /// Find old peer stats by its KeyId if this peer already was in active list and was replaced
@@ -1092,7 +1084,7 @@ impl ReserveNeighbours {
         if let Some(neighbour) = self.reserve.get(peer_id) {
             return Some(neighbour.val().clone());
         }
-        return None;
+        None
     }
     
 }

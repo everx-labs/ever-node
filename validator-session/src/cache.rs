@@ -63,14 +63,14 @@ pub trait CacheObject<T: PoolObject + HashableObject> {
         let hash = value.get_hash();
         let allow_temp = pool == SessionPool::Temp;
 
-        if let Some(ref cache_entry) = &cache.get_cache_entry_by_hash(hash, allow_temp) {
-            if let Some(ref ptr) = Self::unwrap_cache_entry(&cache_entry) {
+        if let Some(cache_entry) = &cache.get_cache_entry_by_hash(hash, allow_temp) {
+            if let Some(ptr) = Self::unwrap_cache_entry(cache_entry) {
                 if ptr.compare(&value) {
                     assert!(
-                        pool == (*ptr).get_pool() || (*ptr).get_pool() == SessionPool::Persistent
+                        pool == ptr.get_pool() || ptr.get_pool() == SessionPool::Persistent
                     );
 
-                    let result = (*ptr).clone();
+                    let result = ptr.clone();
 
                     cache.increment_reuse_counter(result.get_pool());
 
@@ -121,8 +121,8 @@ pub struct CachedInstanceCounter {
 }
 
 impl CachedInstanceCounter {
-    pub fn new(receiver: &catchain::utils::MetricsHandle, key: &String) -> Self {
-        let body = Self {
+    pub fn new(receiver: &catchain::utils::MetricsHandle, key: &str) -> Self {
+        Self {
             pool: SessionPool::Temp,
             total_instance_counter: InstanceCounter::new(receiver, &format!("{}.total", key)),
             persistent_instance_counter: InstanceCounter::new(
@@ -130,20 +130,16 @@ impl CachedInstanceCounter {
                 &format!("{}.persistent", key),
             ),
             temp_instance_counter: InstanceCounter::new(receiver, &format!("{}.temp", key)),
-        };
-
-        body
+        }
     }
 
     pub fn clone_as_temp(&self) -> Self {
-        let body = Self {
+        Self {
             pool: SessionPool::Temp,
             total_instance_counter: self.total_instance_counter.clone(),
             persistent_instance_counter: self.persistent_instance_counter.clone_refs_only(),
             temp_instance_counter: self.temp_instance_counter.clone(),
-        };
-
-        body
+        }
     }
 
     pub fn get_pool(&self) -> SessionPool {
@@ -171,7 +167,7 @@ impl CachedInstanceCounter {
 
 impl Clone for CachedInstanceCounter {
     fn clone(&self) -> Self {
-        let body = Self {
+        Self {
             pool: self.pool,
             total_instance_counter: self.total_instance_counter.clone(),
             persistent_instance_counter: if self.pool == SessionPool::Persistent {
@@ -184,9 +180,7 @@ impl Clone for CachedInstanceCounter {
             } else {
                 self.temp_instance_counter.clone_refs_only()
             },
-        };
-
-        body
+        }
     }
 }
 
@@ -224,24 +218,24 @@ where
         expiration_time: std::time::Duration,
     ) -> Self {
         let reuse_counter =
-            ResultStatusCounter::new(&metrics_receiver, &format!("{}_cache_reuse", name));
+            ResultStatusCounter::new(metrics_receiver, &format!("{}_cache_reuse", name));
         let instance_counter =
-            InstanceCounter::new(&metrics_receiver, &format!("{}_cache_items", name));
+            InstanceCounter::new(metrics_receiver, &format!("{}_cache_items", name));
 
         Self {
             items: HashMap::new(),
-            min_flush_size: min_flush_size,
-            expiration_time: expiration_time,
+            min_flush_size,
+            expiration_time,
             items_to_remove: Vec::with_capacity(min_flush_size),
-            reuse_counter: reuse_counter,
-            instance_counter: instance_counter,
+            reuse_counter,
+            instance_counter,
         }
     }
 
     pub fn get(&mut self, key: &Key) -> Option<&Value> {
         self.reuse_counter.total_increment();
 
-        if let Some(item) = self.items.get_mut(&key) {
+        if let Some(item) = self.items.get_mut(key) {
             item.1 = std::time::SystemTime::now();
 
             self.reuse_counter.success();
@@ -282,7 +276,7 @@ where
         }
 
         for key in &self.items_to_remove {
-            self.items.remove(&key);
+            self.items.remove(key);
         }
 
         self.items_to_remove.clear();

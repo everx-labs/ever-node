@@ -83,10 +83,7 @@ impl VerificationManager for VerificationManagerImpl {
         let _hang_checker = HangCheck::new(self.runtime.clone(), format!("VerificationManagerImpl::send_new_block_candidate: {:?}", candidate.block_id), Duration::from_millis(1000));
 
         let workchain_id = candidate.block_id.shard_id.workchain_id();
-        let workchain = match self.workchains.lock().get(&workchain_id) {
-            Some(workchain) => Some(workchain.clone()),
-            None => None,
-        };
+        let workchain = self.workchains.lock().get(&workchain_id).cloned();
 
         if let Some(workchain) = workchain {
             let block_id = candidate.block_id.clone();
@@ -96,9 +93,9 @@ impl VerificationManager for VerificationManagerImpl {
             };
             let candidate = BlockCandidateBroadcast {
                 id: candidate.block_id.clone(),
-                data: candidate.data.clone().into(),
-                collated_data: candidate.collated_data.clone().into(),
-                collated_data_file_hash: candidate.collated_file_hash.clone().into(),
+                data: candidate.data.clone(),
+                collated_data: candidate.collated_data.clone(),
+                collated_data_file_hash: candidate.collated_file_hash.clone(),
                 created_by: candidate.created_by.clone(),
                 created_timestamp: timestamp as i64,
             };
@@ -123,13 +120,10 @@ impl VerificationManager for VerificationManagerImpl {
         block_id: &BlockIdExt,
     ) -> (bool, bool) {
         let workchain_id = block_id.shard_id.workchain_id();
-        let workchain = match self.workchains.lock().get(&workchain_id) {
-            Some(workchain) => Some(workchain.clone()),
-            None => None,
-        };
+        let workchain = self.workchains.lock().get(&workchain_id).cloned();
 
         if let Some(workchain) = workchain {
-            if let Some(block) = workchain.get_block_by_id(&block_id) {
+            if let Some(block) = workchain.get_block_by_id(block_id) {
                 return workchain.get_block_status(&block);
             }
         }
@@ -146,38 +140,33 @@ impl VerificationManager for VerificationManagerImpl {
         log::trace!(target: "verificator", "Start block {} verification", block_id);
 
         let workchain_id = block_id.shard_id.workchain_id();
-        let workchain = match self.workchains.lock().get(&workchain_id) {
-            Some(workchain) => Some(workchain.clone()),
-            None => None,
-        };
+        let workchain = self.workchains.lock().get(&workchain_id).cloned();
 
         if let Some(workchain) = workchain {
             let smft_config = workchain.get_config();
             let start_time = SystemTime::now();
             let timeout = if let Some(timeout) = timeout {
                 timeout
+            } else if let Some(max_mc_delivery_wait_timeout) = self.config.max_mc_delivery_wait_timeout {
+                //node's config may override SMFT network config
+                max_mc_delivery_wait_timeout
             } else {
-                if let Some(max_mc_delivery_wait_timeout) = self.config.max_mc_delivery_wait_timeout {
-                    //node's config may override SMFT network config
-                    max_mc_delivery_wait_timeout
-                } else {
-                    //use SMFT network config
-                    Duration::from_millis(smft_config.mc_max_delivery_waiting_timeout_ms as u64)
-                }
+                //use SMFT network config
+                Duration::from_millis(smft_config.mc_max_delivery_waiting_timeout_ms as u64)
             };
 
             loop {
                   //check block status
 
-                if let Some(block) = workchain.get_block_by_id(&block_id) {
+                if let Some(block) = workchain.get_block_by_id(block_id) {
                     let (delivered, rejected) = workchain.get_block_status(&block);
 
-                    workchain.update_block_external_delivery_metrics(&block_id, &start_time);
+                    workchain.update_block_external_delivery_metrics(block_id, &start_time);
 
                     if rejected {
                         log::warn!(target: "verificator", "Finish block {} verification - NACK detected", block_id);
 
-                        workchain.start_arbitrage(&block_id);
+                        workchain.start_arbitrage(block_id);
 
                         return false;
                     }
@@ -193,9 +182,9 @@ impl VerificationManager for VerificationManagerImpl {
                 let elapsed_time = get_elapsed_time(&start_time);
                 if elapsed_time > timeout {
                     log::warn!(target: "verificator", "Can't verify block {}: timeout {}ms expired. Start force block delivery", block_id, elapsed_time.as_millis());
-                    workchain.update_block_external_delivery_metrics(&block_id, &start_time);
+                    workchain.update_block_external_delivery_metrics(block_id, &start_time);
 
-                    workchain.start_force_block_delivery(&block_id);
+                    workchain.start_force_block_delivery(block_id);
 
                     if timeout.as_millis() == 0 {
                         //special case: in case of mc_max_delivery_wait_timeout = 0 - work in shadow mode and allow unverified blocks to be included in MC
@@ -240,15 +229,15 @@ impl VerificationManager for VerificationManagerImpl {
     */    
 
     /// Update workchains
-    async fn update_workchains<'a>(
-        &'a self,
+    async fn update_workchains(
+        &self,
         local_key_id: PublicKeyHash,
         local_bls_key: PrivateKey,
         workchain_id: i32,
         utime_since: u32,
-        workchain_validators: &'a Vec<ValidatorDescr>,
-        mc_validators: &'a Vec<ValidatorDescr>,
-        listener: &'a VerificationListenerPtr,
+        workchain_validators: &[ValidatorDescr],
+        mc_validators: &[ValidatorDescr],
+        listener: &VerificationListenerPtr,
         use_debug_bls_keys: bool,
     ) {
         check_execution_time!(100_000);
@@ -273,7 +262,7 @@ impl VerificationManager for VerificationManagerImpl {
             &current_workchains,
             workchain_id,
             utime_since,
-            &workchain_validators,
+            workchain_validators,
             mc_validators,
             listener,
             self.workchains_instance_counter.clone(),
@@ -314,7 +303,7 @@ impl VerificationManagerImpl {
     }
 
     /// Compute validator set hash based on a validators list
-    fn compute_validator_set_hash(utime_since: u32, validators: &Vec<ValidatorDescr>) -> UInt256 {
+    fn compute_validator_set_hash(utime_since: u32, validators: &[ValidatorDescr]) -> UInt256 {
         let mut result = Vec::<u8>::with_capacity(validators.len() * 32);
 
         //TODO: change pubkey to bls pubkey, remove utime_since from hash calculation
@@ -329,6 +318,7 @@ impl VerificationManagerImpl {
         UInt256::calc_file_hash(&result)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn get_workchain_by_validator_set(
         engine: &EnginePtr,
         runtime: tokio::runtime::Handle,
@@ -337,8 +327,8 @@ impl VerificationManagerImpl {
         workchains: &WorkchainMapPtr,
         workchain_id: i32,
         utime_since: u32,
-        wc_validators: &Vec<ValidatorDescr>,
-        mc_validators: &Vec<ValidatorDescr>,
+        wc_validators: &[ValidatorDescr],
+        mc_validators: &[ValidatorDescr],
         listener: &VerificationListenerPtr,
         workchains_instance_counter: Arc<InstanceCounter>,
         blocks_instance_counter: Arc<InstanceCounter>,
@@ -364,8 +354,8 @@ impl VerificationManagerImpl {
             engine.clone(),
             runtime,
             workchain_id,
-            wc_validators.clone(),
-            mc_validators.clone(),
+            wc_validators.to_vec(),
+            mc_validators.to_vec(),
             wc_validator_set_hash,
             mc_validator_set_hash,
             local_key_id,
@@ -398,10 +388,10 @@ impl VerificationManagerImpl {
             let mut metrics_dumper = MetricsDumper::new();
             let mut workchain_metrics_dumpers: HashMap<i32, (MetricsDumper, i32)> = HashMap::new();
 
-            metrics_dumper.add_compute_handler("smft_block".to_string(), &compute_instance_counter);
-            metrics_dumper.add_compute_handler("smft_workchains".to_string(), &compute_instance_counter);
-            metrics_dumper.add_compute_handler("smft_wc_overlays".to_string(), &compute_instance_counter);
-            metrics_dumper.add_compute_handler("smft_mc_overlays".to_string(), &compute_instance_counter);
+            metrics_dumper.add_compute_handler("smft_block".to_string(), compute_instance_counter);
+            metrics_dumper.add_compute_handler("smft_workchains".to_string(), compute_instance_counter);
+            metrics_dumper.add_compute_handler("smft_wc_overlays".to_string(), compute_instance_counter);
+            metrics_dumper.add_compute_handler("smft_mc_overlays".to_string(), compute_instance_counter);
 
             metrics_dumper.add_derivative_metric("smft_block".to_string());
             metrics_dumper.add_derivative_metric("smft_workchains".to_string());
@@ -473,7 +463,7 @@ impl VerificationManagerImpl {
 
                     *updated_loop_idx = loop_idx;
 
-                    workchain_metrics_dumper.update(&workchain.get_metrics_receiver());
+                    workchain_metrics_dumper.update(workchain.get_metrics_receiver());
 
                     workchain_metrics_dumper.dump(|string| {
                         debug!(target: "verificator", "{}", string);
@@ -535,10 +525,10 @@ impl VerificationManagerImpl {
             _metrics_receiver: metrics_receiver.clone(),
             send_new_block_candidate_counter: metrics_receiver.sink().register_counter(&"smft_candidates".into()),
             update_workchains_counter: metrics_receiver.sink().register_counter(&"smft_workchains_updates".into()),
-            blocks_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, &"smft_block".to_string())),
-            workchains_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, &"smft_workchains".to_string())),
-            wc_overlays_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, &"smft_wc_overlays".to_string())),
-            mc_overlays_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, &"smft_mc_overlays".to_string())),
+            blocks_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, "smft_block")),
+            workchains_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, "smft_workchains")),
+            wc_overlays_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, "smft_wc_overlays")),
+            mc_overlays_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, "smft_mc_overlays")),
             should_stop_flag: should_stop_flag.clone(),
             dump_thread_is_stopped_flag: dump_thread_is_stopped_flag.clone(),
             config,

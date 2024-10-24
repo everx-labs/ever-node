@@ -348,7 +348,7 @@ impl ArchiveSlice {
             package_info.idx()
         } else {
             //assert_ne!(package_info.idx(), 0);
-            u32::max_value()
+            u32::MAX
         };
 
         package_info.package().append_entry(&entry,

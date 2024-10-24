@@ -37,6 +37,8 @@ pub trait StopSyncChecker {
     async fn check(&self, engine: &Arc<dyn EngineOperations>) -> bool;
 }
 
+type WaitBlockWithResult = Wait<(u32, Result<Option<Vec<u8>>>)>;
+
 pub(crate) async fn start_sync(
     engine: Arc<dyn EngineOperations>,
     check_stop_sync: Option<&dyn StopSyncChecker>,
@@ -46,7 +48,7 @@ pub(crate) async fn start_sync(
         engine: &Arc<dyn EngineOperations>, 
         seq_no: u32, 
         last_mc_block_id: &Arc<BlockIdExt>, 
-        data: &Vec<u8>
+        data: &[u8]
     ) -> Result<bool> {
         log::info!(target: TARGET, "Reading package for MC seq_no = {}", seq_no);
         let maps = Arc::new(read_package(data).await?);
@@ -63,7 +65,7 @@ pub(crate) async fn start_sync(
 
     fn download(
         engine: &Arc<dyn EngineOperations>, 
-        wait: &Arc<Wait<(u32, Result<Option<Vec<u8>>>)>>, 
+        wait: &Arc<WaitBlockWithResult>, 
         seq_no: u32,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
     ) {
@@ -82,8 +84,8 @@ pub(crate) async fn start_sync(
 
     async fn force_redownload(
         engine: &Arc<dyn EngineOperations>, 
-        wait: &Arc<Wait<(u32, Result<Option<Vec<u8>>>)>>, 
-        queue: &mut Vec<(u32, ArchiveStatus)>,
+        wait: &Arc<WaitBlockWithResult>, 
+        queue: &mut [(u32, ArchiveStatus)],
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>
     ) -> Result<()> {
         // Find latest downloaded archive
@@ -141,7 +143,7 @@ pub(crate) async fn start_sync(
 
     async fn new_downloads(
         engine: &Arc<dyn EngineOperations>, 
-        wait: &Arc<Wait<(u32, Result<Option<Vec<u8>>>)>>, 
+        wait: &Arc<WaitBlockWithResult>, 
         queue: &mut Vec<(u32, ArchiveStatus)>,
         active_peers: &Arc<lockfree::set::Set<Arc<KeyId>>>,
         mut sync_mc_seq_no: u32,
@@ -149,11 +151,11 @@ pub(crate) async fn start_sync(
     ) -> Result<()> {
         force_redownload(engine, wait, queue, active_peers).await?;
         while wait.count() < concurrency {
-            if queue.iter().count() > concurrency {
+            if queue.len() > concurrency {
                 // Do not download too much in advance due to possible OOM
                 break
             } 
-            if queue.iter().position(|(seq_no, _)| seq_no == &sync_mc_seq_no).is_none() {
+            if !queue.iter().any(|(seq_no, _)| seq_no == &sync_mc_seq_no) {
                 queue.push((sync_mc_seq_no, ArchiveStatus::Downloading));
                 download(engine, wait, sync_mc_seq_no, active_peers);
             }
@@ -398,7 +400,7 @@ async fn download_and_import_package(
         maps.blocks.len(),
     );
 
-    assert!(maps.mc_blocks_ids.len() <= u32::max_value() as usize);
+    assert!(maps.mc_blocks_ids.len() <= u32::MAX as usize);
     let predownload_seq_no = mc_seq_no + maps.mc_blocks_ids.len() as u32;
     let download_next_task = tokio::spawn(download_archive(Arc::clone(engine), predownload_seq_no));
 
@@ -423,10 +425,10 @@ async fn import_package(
     Ok(())
 }
 
-async fn read_package(data: &Vec<u8>) -> Result<BlockMaps> {
+async fn read_package(data: &[u8]) -> Result<BlockMaps> {
     let mut maps = BlockMaps::default();
 
-    let mut reader = read_package_from(&data[..]).await?;
+    let mut reader = read_package_from(data).await?;
     while let Some(entry) = reader.next().await? {
         log::trace!(
             target: "sync",
@@ -440,7 +442,7 @@ async fn read_package(data: &Vec<u8>) -> Result<BlockMaps> {
             PackageEntryId::Block(id) => {
                 let id = Arc::new(id);
                 maps.blocks.entry(Arc::clone(&id))
-                    .or_insert_with(|| BlocksEntry::default())
+                    .or_insert_with(BlocksEntry::default)
                     .block = Some(Arc::new(
                     BlockStuff::deserialize_block_checked((*id).clone(), entry.take_data())?
                 ));
@@ -461,7 +463,7 @@ async fn read_package(data: &Vec<u8>) -> Result<BlockMaps> {
                 }
                 let id = Arc::new(id);
                 maps.blocks.entry(Arc::clone(&id))
-                    .or_insert_with(|| BlocksEntry::default())
+                    .or_insert_with(BlocksEntry::default)
                     .proof = Some(Arc::new(
                     BlockProofStuff::deserialize(&id, entry.take_data(), false)?
                 ));
@@ -479,7 +481,7 @@ async fn read_package(data: &Vec<u8>) -> Result<BlockMaps> {
                     continue;
                 }
                 maps.blocks.entry(Arc::new(id))
-                    .or_insert_with(|| BlocksEntry::default())
+                    .or_insert_with(BlocksEntry::default)
                     .proof = Some(Arc::new(
                     BlockProofStuff::deserialize(&id, entry.take_data(), true)?
                 ));
@@ -560,10 +562,8 @@ async fn import_mc_blocks(
     for id in maps.mc_blocks_ids.values() {
 
         if id.seq_no() <= last_mc_block_id.seq_no() {
-            if id.seq_no() == last_mc_block_id.seq_no() {
-                if **last_mc_block_id != **id {
-                    fail!("Bad old masterchain block ID");
-                }
+            if id.seq_no() == last_mc_block_id.seq_no() && last_mc_block_id != id {
+                fail!("Bad old masterchain block ID");
             }
             log::debug!(target: "sync", "Skipped already applied MC block: {}", id);
             continue;
@@ -578,7 +578,7 @@ async fn import_mc_blocks(
 
         log::debug!(target: "sync", "Importing MC block: {}", id);
         last_mc_block_id = id;
-        if let Some(handle) = engine.load_block_handle(&last_mc_block_id)? {
+        if let Some(handle) = engine.load_block_handle(last_mc_block_id)? {
             if handle.is_applied() {
                 log::debug!(
                     target: "sync", 
@@ -590,7 +590,7 @@ async fn import_mc_blocks(
         } 
 
         let entry = maps.blocks.get(last_mc_block_id).expect("Inconsistent BlocksMap");
-        let (handle, block, _proof) = save_block(engine, &last_mc_block_id, entry).await?;
+        let (handle, block, _proof) = save_block(engine, last_mc_block_id, entry).await?;
         log::debug!(target: "sync", "Applying masterchain block: {}...", last_mc_block_id);
         Arc::clone(engine).apply_block(
             &handle, &block, last_mc_block_id.seq_no(), false
@@ -632,7 +632,7 @@ async fn import_shard_blocks(
 
         log::debug!(target: "sync", "Importing shardchain blocks for MC block: {}...", mc_block_id);
 
-        let mc_handle = engine.load_block_handle(&mc_block_id)?.ok_or_else(
+        let mc_handle = engine.load_block_handle(mc_block_id)?.ok_or_else(
             || error!("Cannot load handle for master block {}", mc_block_id)
         )?;
         let mc_block = engine.load_block(&mc_handle).await?;
@@ -697,7 +697,7 @@ async fn import_shard_blocks(
         wait_for(tasks).await?;
 
         shard_client_mc_block_id = Arc::clone(mc_block_id);
-        engine.save_shard_client_mc_block_id(&mc_block_id)?;
+        engine.save_shard_client_mc_block_id(mc_block_id)?;
     }
 
     Ok(())

@@ -36,13 +36,9 @@ pub fn start_masterchain_client(
 ) -> Result<tokio::task::JoinHandle<()>> {
     let join_handle = tokio::spawn(async move {
         engine.acquire_stop(Engine::MASK_SERVICE_MASTERCHAIN_CLIENT);
-        loop {
-            if let Err(e) = load_master_blocks_cycle(engine.clone(), last_got_block_id.clone()).await {
-                log::error!("Unexpected error in master blocks loading cycle: {:?}", e);
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            } else {
-                break;
-            }
+        while let Err(e) = load_master_blocks_cycle(engine.clone(), last_got_block_id.clone()).await {
+            log::error!("Unexpected error in master blocks loading cycle: {:?}", e);
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
         engine.release_stop(Engine::MASK_SERVICE_MASTERCHAIN_CLIENT);
     });
@@ -55,13 +51,9 @@ pub fn start_shards_client(
 ) -> Result<tokio::task::JoinHandle<()>> {
     let join_handle = tokio::spawn(async move {
         engine.acquire_stop(Engine::MASK_SERVICE_SHARDCHAIN_CLIENT);
-        loop {
-            if let Err(e) = load_shard_blocks_cycle(engine.clone(), &shards_mc_block_id).await {
-                log::error!("Unexpected error in shards client: {:?}", e);
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            } else {
-                break;
-            }
+        while let Err(e) = load_shard_blocks_cycle(engine.clone(), &shards_mc_block_id).await {
+            log::error!("Unexpected error in shards client: {:?}", e);
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
         engine.release_stop(Engine::MASK_SERVICE_SHARDCHAIN_CLIENT);
     });
@@ -133,7 +125,7 @@ async fn load_next_master_block(
         fail!("Invalid next master block got: {}, prev: {}", block.id(), prev_id);
     }
 
-    let prev_state = engine.clone().wait_state(&prev_id, None, true).await?;
+    let prev_state = engine.clone().wait_state(prev_id, None, true).await?;
     proof.check_with_master_state(&prev_state)?;
     let mut next_handle = loop {
         if let Some(next_handle) = engine.load_block_handle(block.id())? {
@@ -175,7 +167,7 @@ async fn load_shard_blocks_cycle(
     shards_mc_block_id: &BlockIdExt
 ) -> Result<()> {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(SHARD_CLIENT_WINDOW));
-    let mut mc_handle = engine.load_block_handle(&shards_mc_block_id)?.ok_or_else(
+    let mut mc_handle = engine.load_block_handle(shards_mc_block_id)?.ok_or_else(
         || error!("Cannot load handle for shard master block {}", shards_mc_block_id)
     )?;
     loop {
@@ -386,7 +378,7 @@ pub async fn apply_proof_chain(
         proof_chain.len()
     );
 
-    if proof_chain.len() == 0 {
+    if proof_chain.is_empty() {
         return Ok(true);
     }
 
@@ -428,14 +420,14 @@ pub async fn apply_proof_chain(
                 .to_non_updated().ok_or_else(
                     || error!("INTERNAL ERROR: mismatch in empty queue update {} storing", id)
                 )?;
-            Arc::clone(&engine).apply_block(
+            Arc::clone(engine).apply_block(
                 &handle,
                 &block_stuff,
                 mc_seq_no,
                 pre_apply,
             ).await?;
         } else if !apply_only_empty {
-            Arc::clone(&engine).download_and_apply_block(
+            Arc::clone(engine).download_and_apply_block(
                 &id,
                 mc_seq_no, 
                 pre_apply

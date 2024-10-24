@@ -65,10 +65,10 @@ impl BlockProofStuff {
                 NodeError::InvalidData(format!("proof for non-masterchain block {}", id))
             )
         }
-        let cell = proof.serialize()?.into();
+        let cell = proof.serialize()?;
         let data = Arc::new(write_boc(&cell)?);
         Ok(Self {
-            root: proof.serialize()?.into(),
+            root: proof.serialize()?,
             proof,
             is_link,
             id,
@@ -89,10 +89,10 @@ impl BlockProofStuff {
             root: Cell::default(),
             signatures: None,
         };
-        let cell = proof.serialize()?.into();
+        let cell = proof.serialize()?;
         let data = Arc::new(write_boc(&cell)?);
         Ok(Self {
-            root: proof.serialize()?.into(),
+            root: proof.serialize()?,
             proof,
             is_link: !id.shard().is_masterchain(),
             id: id.clone(),
@@ -322,7 +322,7 @@ impl BlockProofStuff {
             )))
         }
         let prev_key_block_seqno = virt_block.read_info()?.prev_key_block_seqno();
-        if prev_key_block_proof.id().seq_no as u32 != prev_key_block_seqno {
+        if prev_key_block_proof.id().seq_no != prev_key_block_seqno {
             fail!(NodeError::InvalidData(format!(
                 "Can't verify block {} using key block {} because the block declares different previous key block seqno {}",
                 self.id(),
@@ -353,7 +353,7 @@ impl BlockProofStuff {
 
     fn check_with_master_state_(&self, master_state: &ShardStateStuff, virt_block: &Block, virt_block_info: &BlockInfo) -> Result<()> {
         if virt_block_info.key_block() {
-            self.pre_check_key_block_proof(&virt_block)?;
+            self.pre_check_key_block_proof(virt_block)?;
         }
         let subset = self.process_given_state(master_state, virt_block_info)?;
         self.check_signatures(&subset)
@@ -418,7 +418,7 @@ impl BlockProofStuff {
             )))
         }
 
-        if info.read_master_ref()?.is_some() != (!info.shard().is_masterchain()) {
+        if info.read_master_ref()?.is_some() == info.shard().is_masterchain() {
             fail!(NodeError::InvalidData(format!(
                 "proof for block {} contains a Merkle proof with invalid not_master flag in block info",
                 id,
@@ -620,7 +620,7 @@ impl BlockProofStuff {
                 self.id(),
             )));
         }
-        if (state.block_id().seq_no as u32) < block_info.prev_key_block_seqno() {
+        if state.block_id().seq_no < block_info.prev_key_block_seqno() {
             fail!(NodeError::InvalidData(format!(
                 "Can't check proof for block {} using master state {}, because it is older than the previous key block with seqno {}",
                 self.id(),

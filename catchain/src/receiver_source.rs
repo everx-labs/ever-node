@@ -163,7 +163,7 @@ impl ReceiverSource for ReceiverSourceImpl {
     }
 
     fn add_fork(&mut self, receiver: &mut dyn Receiver) -> usize {
-        if self.fork_ids.len() > 0 {
+        if !self.fork_ids.is_empty() {
             self.mark_as_blamed(receiver);
         }
 
@@ -214,7 +214,7 @@ impl ReceiverSource for ReceiverSourceImpl {
         self.blamed = true;
     }
 
-    fn get_forks(&self) -> &Vec<usize> {
+    fn get_forks(&self) -> &[usize] {
         &self.fork_ids
     }
 
@@ -223,7 +223,7 @@ impl ReceiverSource for ReceiverSourceImpl {
     }
 
     fn is_fork_found(&self) -> bool {
-        !self.fork_proof.is_none()
+        self.fork_proof.is_some()
     }
 
     fn set_fork_proof(&mut self, fork_proof: ton::BlockDataFork) {
@@ -256,7 +256,7 @@ impl ReceiverSource for ReceiverSourceImpl {
             return true;
         }
 
-        if self.blocks.len() == 0 {
+        if self.blocks.is_empty() {
             return false;
         }
 
@@ -353,10 +353,10 @@ impl ReceiverSourceImpl {
         );
 
         Self {
-            id: id,
+            id,
             adnl_id: adnl_id.clone(),
-            public_key: public_key,
-            public_key_hash: public_key_hash,
+            public_key,
+            public_key_hash,
             blamed: false,
             delivered_height: 0,
             received_height: 0,

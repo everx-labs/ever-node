@@ -27,6 +27,7 @@ pub struct OnBlockCommitted {
     approve_signatures: Vec<(PublicKeyHash, BlockPayloadPtr)>
 }
 
+#[allow(clippy::enum_variant_names)]
 pub enum ValidationAction {
     OnGenerateSlot {
         round: u32, 
@@ -105,7 +106,7 @@ pub struct ValidatorSessionListener {
 
 impl ValidatorSessionListener {
     pub fn info_round(&self, round: Option<u32>) -> String {
-        return format!("ValidatorSessionListener; round = {:?}", round);
+        format!("ValidatorSessionListener; round = {:?}", round)
     }
 
     fn do_send_general(&self, round: Option<u32>, action: ValidationAction) {
@@ -118,7 +119,7 @@ impl ValidatorSessionListener {
 
     pub fn create() -> (Self, crossbeam_channel::Receiver<ValidationAction>) {
         let (sender, receiver) = crossbeam_channel::unbounded();
-        return (ValidatorSessionListener { queue: sender }, receiver);
+        (ValidatorSessionListener { queue: sender }, receiver)
     }
 }
 

@@ -194,7 +194,7 @@ async fn main() -> Result<()> {
             let mut top_blocks = last_mc_state.top_blocks_all()?;
             top_blocks.push((*last_mc_id).clone());
             for block_id in &top_blocks {
-                let state = db.load_shard_state_dynamic(&block_id)?;
+                let state = db.load_shard_state_dynamic(block_id)?;
                 state.state()?.read_accounts()?.iterate_objects(|shard_account| {
                     let account = shard_account.read_account()?;
                     let addr = account.get_addr().unwrap();

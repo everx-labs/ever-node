@@ -596,7 +596,7 @@ impl HashmapOrderedFilterCursor {
                     // clone current node and children to emulate children results aggregation
                     // to calc avg time for this operation
                     if aggregate_children_results_avg_time_calc_attempts < 6 {
-                        let mut cloned_child_left = children.get(0).cloned().unwrap();
+                        let mut cloned_child_left = children.first().cloned().unwrap();
                         cloned_child_left.is_processed = true;
                         cloned_child_left.node_updated = true;
 
@@ -676,7 +676,7 @@ impl HashmapOrderedFilterCursor {
                 "clean_out_msg_queue: hop {}: Processing stopped because next nodes have lt > max_lt, finalizing processing",
                 self.hops_counter,
             );
-            return self.finalize_processing();
+            self.finalize_processing()
         }
     }
 
@@ -1114,7 +1114,7 @@ impl HashmapOrderedFilterCursor {
                 let child = if current.child_left_removed {
                     children_ref.get(1).unwrap()
                 } else {
-                    children_ref.get(0).unwrap()
+                    children_ref.first().unwrap()
                 };
                 let child_node_obj = child.node_obj_ref();
                 (child_node_obj.key(), &child_node_obj.remainder)

@@ -29,6 +29,7 @@ use adnl::{
     node::AdnlNode
 };
 use adnl::{BroadcastSendInfo, OverlayShortId, OverlayNode};
+use catchain::utils::deserialize_tl_boxed_object;
 use rand::seq::SliceRandom;
 use std::{io::Cursor, time::Instant, sync::Arc, time::Duration, collections::HashSet};
 #[cfg(feature = "telemetry")]
@@ -64,6 +65,7 @@ use ever_block::BlockIdExt;
 use ever_block::{fail, KeyId, Result};
 
 #[async_trait::async_trait]
+#[allow(clippy::too_many_arguments)]
 pub trait FullNodeOverlayClient : Sync + Send {
     async fn broadcast_external_message(&self, msg: &[u8]) -> Result<BroadcastSendInfo>;
     async fn send_block_broadcast(&self, broadcast: BlockBroadcast) -> Result<()>;
@@ -306,16 +308,12 @@ impl NodeClientOverlay {
         &self.peers
     }
 
-    async fn send_adnl_query_to_peer<R, D>(
+    async fn send_adnl_query_to_peer<D: ton_api::AnyBoxedSerialize>(
         &self,
         peer: &Arc<Neighbour>,
         data: &TaggedTlObject,
         timeout: Option<u64>
-    ) -> Result<Option<D>>
-    where
-        R: ton_api::AnyBoxedSerialize,
-        D: ton_api::AnyBoxedSerialize
-    {
+    ) -> Result<Option<D>> {
 
         let request_str = if log::log_enabled!(log::Level::Trace) || cfg!(feature = "telemetry") {
             format!("ADNL {:?}", data.object)
@@ -328,7 +326,7 @@ impl NodeClientOverlay {
         let timeout = timeout.or(Some(AdnlNode::calc_timeout(peer.roundtrip_adnl())));
         let answer = self.network_context.overlay.query(
             peer.id(),
-            &data,
+            data,
             &self.overlay_id,
             timeout
         ).await?;
@@ -376,21 +374,17 @@ impl NodeClientOverlay {
     }
 
     // use this function if request size and answer size < 768 bytes (send query via ADNL)
-    async fn send_adnl_query_to_peer_id<R, D>(
+    async fn send_adnl_query_to_peer_id<D: ton_api::AnyBoxedSerialize>(
         &self,
         peer: &Arc<KeyId>,
         data: &TaggedTlObject,
         timeout: Option<u64>,
-    ) -> Result<(D, Arc<Neighbour>)>
-    where
-        R: ton_api::AnyBoxedSerialize,
-        D: ton_api::AnyBoxedSerialize
-    {
+    ) -> Result<(D, Arc<Neighbour>)> {
         let peer = match self.peers.peer(peer) {
             Some(peer) => peer,
             None => {
                 if self.peers.add_overlay_peer(peer.clone()) {
-                    if let Some(peer) = self.peers.peer(&peer) {
+                    if let Some(peer) = self.peers.peer(peer) {
                         // add_peer = Some(peer.clone());
                         peer
                     } else {
@@ -401,7 +395,7 @@ impl NodeClientOverlay {
                 }
             }
         };
-        match self.send_adnl_query_to_peer::<R, D>(&peer, data, timeout).await {
+        match self.send_adnl_query_to_peer::<D>(&peer, data, timeout).await {
             Ok(Some(answer)) => Ok((answer, peer)),
             Ok(None) => fail!(
                 "Cannot send query {:?} to peer {}: no reply", 
@@ -437,7 +431,7 @@ impl NodeClientOverlay {
         if let Some(active_peers) = active_peers {
             for peer in active_peers.iter() {
                 let peer = peer.as_ref();
-                match self.send_adnl_query_to_peer_id::<R, D>(peer, &data, timeout).await {
+                match self.send_adnl_query_to_peer_id::<D>(peer, &data, timeout).await {
                     Ok((result, peer)) => {
                         if f(&result) {
                             return Ok((result, peer));
@@ -462,7 +456,7 @@ impl NodeClientOverlay {
             if bad_peers.contains(peer) {
                 continue;
             } 
-            match self.send_adnl_query_to_peer_id::<R, D>(peer, &data, timeout).await {
+            match self.send_adnl_query_to_peer_id::<D>(peer, &data, timeout).await {
                 Ok((result, peer)) => {
                     if f(&result) {
                         if let Some(active_peers) = active_peers {
@@ -510,7 +504,7 @@ impl NodeClientOverlay {
                     continue;
                 }
             }
-            match self.send_adnl_query_to_peer::<R, D>(&peer, &data, timeout).await {
+            match self.send_adnl_query_to_peer::<D>(&peer, &data, timeout).await {
                 Err(e) => {
                     if let Some(active_peers) = active_peers {
                         active_peers.remove(peer.id());
@@ -582,7 +576,7 @@ impl NodeClientOverlay {
         let mut query = self.network_context.overlay.get_query_prefix(&self.overlay_id)?;
         serialize_boxed_append(&mut query, &request.object)?;
         let request_str = if log::log_enabled!(log::Level::Trace) || cfg!(feature = "telemetry") {
-            format!("{}", std::any::type_name::<T>())
+            std::any::type_name::<T>().to_string()
         } else {
             String::default()
         };
@@ -1140,7 +1134,7 @@ Ok(if key_block {
             None,
         ).await?;
         if !ids.blocks().is_empty() {
-            return Ok(ids.only().blocks.into())
+            return Ok(ids.only().blocks)
         }
         return Ok(Vec::new());
     }
@@ -1309,7 +1303,7 @@ Ok(if key_block {
                 if prev_id.seq_no() + 1 != data_full.id.seq_no() {
                     fail!("Answer for DownloadNextMeshUpdate has wrong id");
                 }
-                if data_full.proof.len() > 0 {
+                if !data_full.proof.is_empty() {
                     fail!("Answer for DownloadNextMeshUpdate should have empty proof");
                 }
                 if data_full.is_link == Bool::BoolTrue {
@@ -1397,7 +1391,7 @@ Ok(if key_block {
                     nw_id, peer.id())
             },
             DataFull::TonNode_DataFull(data_full) => {
-                if data_full.proof.len() > 0 {
+                if !data_full.proof.is_empty() {
                     fail!("Answer for DownloadLatestMeshKit should have empty proof");
                 }
                 if data_full.is_link == Bool::BoolTrue {
@@ -1450,16 +1444,12 @@ Ok(if key_block {
     }
 
     async fn wait_broadcast(&self) -> Result<Option<(Broadcast, Arc<KeyId>)>> {
-        loop {
-            match self.network_context.overlay.wait_for_broadcast(&self.overlay_id).await? {
-                Some(info) => {
-                    let answer: Broadcast = Deserializer::new(
-                        &mut Cursor::new(info.data)
-                    ).read_boxed()?;
-                    break Ok(Some((answer, info.recv_from)))
-                },
-                None => break Ok(None),
-            }
+        match self.network_context.overlay.wait_for_broadcast(&self.overlay_id).await? {
+            Some(info) => {
+                let answer: Broadcast = deserialize_tl_boxed_object(&info.data)?;
+                Ok(Some((answer, info.recv_from)))
+            },
+            None => Ok(None),
         }
     }
 

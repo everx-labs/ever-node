@@ -40,10 +40,16 @@ pub struct FullNodeNetworkTelemetry {
 
 impl FullNodeNetworkTelemetry {
 
-    pub fn new(kind: FullNodeNetworkTelemetryKind) -> Self {
+    pub fn new_client() -> Self {
         FullNodeNetworkTelemetry {
             queries: lockfree::map::Map::default(),
-            kind,
+            kind: FullNodeNetworkTelemetryKind::Client,
+        }
+    }
+    pub fn new_service() -> Self {
+        FullNodeNetworkTelemetry {
+            queries: lockfree::map::Map::default(),
+            kind: FullNodeNetworkTelemetryKind::Service,
         }
     }
 

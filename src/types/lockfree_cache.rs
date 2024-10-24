@@ -56,12 +56,10 @@ impl<K, V> TimeBasedCache<K, V> where
                         t.store(now, Ordering::Relaxed);
                         Ok(None)
                     }
+                } else if let Some(new) = factory(None) {
+                    Ok(Some((new, AtomicU64::new(now))))
                 } else {
-                    if let Some(new) = factory(None) {
-                        Ok(Some((new, AtomicU64::new(now))))
-                    } else {
-                        Ok(None)
-                    }
+                    Ok(None)
                 }
             }
         )

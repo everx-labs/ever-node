@@ -24,7 +24,7 @@ impl ShardBlocksObserver {
             if start_mc_block.id().seq_no() > 0 {
                 let start_mc_block = engine.load_block(start_mc_block).await?;
                 let shard_hashes: ShardHashesStuff = start_mc_block.shards()?.into();
-                for id in shard_hashes.top_blocks(&vec!(processed_wc))? {
+                for id in shard_hashes.top_blocks(&[processed_wc])? {
                     top_processed_blocks.insert(id);
                 }
             } else {

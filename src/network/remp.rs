@@ -293,7 +293,7 @@ impl SendCombinedReceipt for SendCombinedReceiptByAdnl {
         self_adnl_id: Arc<KeyId>,
     ) -> Result<()> {
         let tagged_data = TaggedByteSlice {
-            object: &receipt,
+            object: receipt,
             #[cfg(feature = "telemetry")]
             tag: self.adnl_tag
         };
@@ -396,7 +396,7 @@ async fn receipts_worker(
                         let timeout = node_updated_at.elapsed().as_millis() as u64 > RECEIPTS_SEND_PERIOD_MS;
                         if build_result.is_full_packet || timeout {
                             let now = Instant::now();
-                            sender.send_combined_receipt(&node_id, &data, adnl_id.clone()).await?;
+                            sender.send_combined_receipt(node_id, data, adnl_id.clone()).await?;
                             log::debug!(
                                 "ReceiptsSender::worker: sent packet (because of {})  {} bytes  {} receipts  to {}  TIME {}ms", 
                                 if timeout { "timeout" } else { "full packet" },
@@ -411,7 +411,7 @@ async fn receipts_worker(
 
                             *node_updated_at = Instant::now();
 
-                            mark_as_sent(node_receipts, &receipt)?;
+                            mark_as_sent(node_receipts, receipt)?;
 
                             packets += 1;
 
@@ -470,32 +470,30 @@ fn build_combined_receipt(
         let elapsed = last_receipt.updated_at.elapsed();
         if elapsed.as_secs() > CLEANUP_MSG_AFTER_SEC {
             to_cleanup.push(id.clone());
-        } else if last_receipt.receipt.is_some() {
-            if is_update_timeout(&elapsed, last_receipt.sent_receipts) {
-                log::trace!(
-                    "build_combined_receipt for {}: include receipt for {:x}, updated since {}ms, sent {}",
-                    node_id, id, elapsed.as_millis(), last_receipt.sent_receipts
-                );
-                to_packet.push(last_receipt);
-                let (receipt, receipt_data) = build_combined_receipt_from(&to_packet)?;
-                if receipt_data.len() > PACKAGE_MAX_LOAD {
-                    result.is_full_packet = true;
-                    if result.receipt.is_none() {
-                        log::warn!(
-                            "build_combined_receipt for {}: receipt becomes too long ({})\
-                            after only one receipt was included.", 
-                            node_id, receipt_data.len()
-                        );
-                        result.receipt = Some(receipt);
-                        result.receipt_data = Some(receipt_data);
-                        result.self_adnl_id = Some(last_receipt.self_adnl_id.clone());
-                    }
-                    break;
+        } else if last_receipt.receipt.is_some() && is_update_timeout(&elapsed, last_receipt.sent_receipts) {
+            log::trace!(
+                "build_combined_receipt for {}: include receipt for {:x}, updated since {}ms, sent {}",
+                node_id, id, elapsed.as_millis(), last_receipt.sent_receipts
+            );
+            to_packet.push(last_receipt);
+            let (receipt, receipt_data) = build_combined_receipt_from(&to_packet)?;
+            if receipt_data.len() > PACKAGE_MAX_LOAD {
+                result.is_full_packet = true;
+                if result.receipt.is_none() {
+                    log::warn!(
+                        "build_combined_receipt for {}: receipt becomes too long ({})\
+                        after only one receipt was included.", 
+                        node_id, receipt_data.len()
+                    );
+                    result.receipt = Some(receipt);
+                    result.receipt_data = Some(receipt_data);
+                    result.self_adnl_id = Some(last_receipt.self_adnl_id.clone());
                 }
-                result.receipt = Some(receipt);
-                result.receipt_data = Some(receipt_data);
-                result.self_adnl_id = Some(last_receipt.self_adnl_id.clone());
+                break;
             }
+            result.receipt = Some(receipt);
+            result.receipt_data = Some(receipt_data);
+            result.self_adnl_id = Some(last_receipt.self_adnl_id.clone());
         }
     }
 
@@ -700,7 +698,7 @@ fn build_combined_receipt_from(receipts: &[&LastReceipt]) -> Result<(RempCombine
                 ton_api::ton::ton_node::rempreceiptcompact::RempReceiptCompact {
                     message_id: r.message_id().clone(),
                     receipt: compact_status,
-                    timestamp: r.timestamp().clone(),
+                    timestamp: *r.timestamp(),
                 }
             ));
         }
@@ -709,8 +707,8 @@ fn build_combined_receipt_from(receipts: &[&LastReceipt]) -> Result<(RempCombine
     let rcr = RempCombinedReceipt::TonNode_RempCombinedReceipt(
         ton_api::ton::ton_node::rempcombinedreceipt::RempCombinedReceipt {
             source_id,
-            ids: ids.into(),
-            receipts: compact_receipts.into(),
+            ids,
+            receipts: compact_receipts,
         }
     );
     let data = serialize_boxed(&rcr)?;

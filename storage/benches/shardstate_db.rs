@@ -14,7 +14,7 @@
 use std::{sync::Arc, collections::HashSet};
 use storage::{
     db::rocksdb::{RocksDb, destroy_rocks_db},
-    shardstate_db_async::{AllowStateGcResolver, CellsDbConfig, ShardStateDb, SsNotificationCallback},
+    shardstate_db_async::{CellsDbConfig, ShardStateDb, SsNotificationCallback},
     StorageAlloc,
 };
 #[cfg(feature = "telemetry")]
@@ -26,14 +26,6 @@ use rand::{Rng, SeedableRng};
 include!("../../common/src/log.rs");
 
 const DB_PATH: &str = "../target/test";
-
-struct MockedResolver;
-
-impl AllowStateGcResolver for MockedResolver {
-    fn allow_state_gc(&self, block_id: &BlockIdExt, _saved_at: u64, _gc_utime: u64) -> Result<bool> {
-        Ok(block_id.seq_no() > 2_467_100)
-    }
-}
 
 fn update_boc(old_root: &Cell, need_cells: u32, new_cells: &mut u32, rng: &mut impl rand::RngCore) -> Result<Cell> {
     let mut new_root = old_root.clone();
@@ -151,8 +143,6 @@ async fn main() -> Result<()> {
             "shardstate_db",
             "cells_db",
             DB_PATH,
-            false,
-            false,
             CellsDbConfig::default(),
             #[cfg(feature = "telemetry")]
             Arc::new(StorageTelemetry::default()),

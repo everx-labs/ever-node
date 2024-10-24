@@ -10,6 +10,7 @@
 * See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
+#![allow(clippy::too_many_arguments)]
 
 //TODO: remove duplicates for make_one & apply_action
 
@@ -109,20 +110,15 @@ impl RoundState for RoundStateImpl {
     }
 
     fn check_block_is_sent_by(&self, src_idx: u32) -> bool {
-        if self.sent_blocks.is_none() {
-            return false;
-        }
-
-        let candidates = self.sent_blocks.as_ref().unwrap();
-
-        for block_candidate in candidates.iter() {
-            if let Some(sent_block) = block_candidate.get_block() {
-                if sent_block.get_source_index() == src_idx {
-                    return true;
+        if let Some(candidates) = self.sent_blocks.as_ref() {
+            for block_candidate in candidates.iter() {
+                if let Some(sent_block) = block_candidate.get_block() {
+                    if sent_block.get_source_index() == src_idx {
+                        return true;
+                    }
                 }
             }
         }
-
         false
     }
 
@@ -131,34 +127,26 @@ impl RoundState for RoundStateImpl {
     */
 
     fn has_approved_block(&self, desc: &dyn SessionDescription) -> bool {
-        if self.sent_blocks.is_none() {
-            return false;
-        }
-
-        for block_candidate in self.sent_blocks.as_ref().unwrap().iter() {
-            if block_candidate.check_block_is_approved(desc) {
-                return true;
+        if let Some(candidates) = self.sent_blocks.as_ref() {
+            for block_candidate in candidates.iter() {
+                if block_candidate.check_block_is_approved(desc) {
+                    return true;
+                }
             }
         }
-
-        return false;
+        false
     }
 
     fn get_block_approvers(&self, desc: &dyn SessionDescription, block_id: &BlockId) -> Vec<u32> {
         let block_ptr = self.get_candidate(block_id);
 
-        if block_ptr.is_none() {
+        let Some(block) = block_ptr else {
             return Vec::new();
-        }
-
-        let block = block_ptr.unwrap();
-
-        let mut result = Vec::new();
-
-        result.reserve(desc.get_total_nodes() as usize);
+        };
+        let mut result = Vec::with_capacity(desc.get_total_nodes() as usize);
 
         for i in 0..desc.get_total_nodes() {
-            if block.check_block_is_approved_by(i as u32) {
+            if block.check_block_is_approved_by(i) {
                 result.push(i);
             }
         }
@@ -171,15 +159,10 @@ impl RoundState for RoundStateImpl {
         _desc: &dyn SessionDescription,
         src_idx: u32,
     ) -> Vec<SentBlockPtr> {
-        if self.sent_blocks.is_none() {
+        let Some(candidates) = self.sent_blocks.as_ref() else {
             return Vec::new();
-        }
-
-        let candidates = self.sent_blocks.as_ref().unwrap();
-        let mut result = Vec::new();
-
-        result.reserve(candidates.len());
-
+        };
+        let mut result = Vec::with_capacity(candidates.len());
         for block_candidate in candidates.iter() {
             if block_candidate.check_block_is_approved_by(src_idx) {
                 result.push(block_candidate.get_block().clone());
@@ -190,18 +173,13 @@ impl RoundState for RoundStateImpl {
     }
 
     fn check_block_is_approved_by(&self, src_idx: u32, block_id: &BlockId) -> bool {
-        if self.sent_blocks.is_none() {
-            return false;
-        }
-
-        let candidates = self.sent_blocks.as_ref().unwrap();
-
-        for block_candidate in candidates.iter() {
-            if block_candidate.get_id() == block_id {
-                return block_candidate.check_block_is_approved_by(src_idx);
+        if let Some(candidates) = self.sent_blocks.as_ref() {
+            for block_candidate in candidates.iter() {
+                if block_candidate.get_id() == block_id {
+                    return block_candidate.check_block_is_approved_by(src_idx);
+                }
             }
         }
-
         false
     }
 
@@ -265,10 +243,8 @@ impl RoundState for RoundStateImpl {
 
         let mut blocks = Vec::with_capacity(block_candidates.len());
 
-        for block_candidate in &block_candidates {
-            if let Some(block_candidate) = block_candidate {
-                blocks.push(block_candidate.get_block().clone());
-            }
+        for block_candidate in block_candidates.iter().flatten() {
+            blocks.push(block_candidate.get_block().clone());
         }
 
         if !was_empty {
@@ -289,7 +265,7 @@ impl RoundState for RoundStateImpl {
             }
         }
 
-        return false;
+        false
     }
 
     fn check_need_generate_vote_for(
@@ -346,7 +322,7 @@ impl RoundState for RoundStateImpl {
             }
         }
 
-        return false;
+        false
     }
 
     fn choose_block_to_vote(
@@ -458,14 +434,14 @@ impl RoundState for RoundStateImpl {
             }
         }
 
-        assert!(candidate_block_ids.len() > 0);
+        assert!(!candidate_block_ids.is_empty());
 
         let random_candidate_index = desc.generate_random_usize() % candidate_block_ids.len();
 
         ton::message::VoteFor {
             round: self.get_sequence_number() as i32,
             attempt: attempt_id as i32,
-            candidate: candidate_block_ids[random_candidate_index].clone().into(),
+            candidate: candidate_block_ids[random_candidate_index].clone(),
         }
         .into_boxed()
     }
@@ -572,22 +548,22 @@ impl RoundState for RoundStateImpl {
                 attempt_id
             );
 
-            return Some(
+            Some(
                 ton::message::Vote {
                     round: self.sequence_number as ton::int,
                     attempt: attempt_id as ton::int,
-                    candidate: block_id.clone().into(),
+                    candidate: block_id.clone(),
                 }
                 .into_boxed(),
-            );
+            )
         } else {
-            return Some(
+            Some(
                 ton::message::Empty {
                     round: self.sequence_number as ton::int,
                     attempt: attempt_id as ton::int,
                 }
                 .into_boxed(),
-            );
+            )
         }
     }
 
@@ -636,7 +612,7 @@ impl RoundState for RoundStateImpl {
 
             sign_weight += desc.get_node_weight(i);
 
-            if sign_dump != "" {
+            if !sign_dump.is_empty() {
                 sign_dump = format!("{}, ", sign_dump);
             }
 
@@ -748,7 +724,7 @@ impl RoundState for RoundStateImpl {
                 format!("{}      - v{:03}: {}\n", first_attempts_dump, i, attempt_id);
         }
 
-        if first_attempts_dump != "" {
+        if !first_attempts_dump.is_empty() {
             result = format!("{}    - first_attempt:\n{}", result, first_attempts_dump);
         } else {
             result = format!("{}    - first_attempt: N/A\n", result);
@@ -769,7 +745,7 @@ impl RoundState for RoundStateImpl {
                 format!("{}      - v{:03}: {}\n", last_precommit_dump, i, attempt_id);
         }
 
-        if last_precommit_dump != "" {
+        if !last_precommit_dump.is_empty() {
             result = format!("{}    - last_precommit:\n{}", result, last_precommit_dump);
         } else {
             result = format!("{}    - last_precommit: N/A\n", result);
@@ -777,21 +753,19 @@ impl RoundState for RoundStateImpl {
 
         //dump attempts
 
-        let mut attempts_dump_count = 0;
         let mut attempts_dump = "".to_string();
 
-        for attempt in self.attempts.get_iter().rev() {
-            const MAX_ATTEMPTS_DUMP_COUNT: u32 = 10;
+        for (attempts_dump_count, attempt) in self.attempts.get_iter().rev().enumerate() {
+            const MAX_ATTEMPTS_DUMP_COUNT: usize = 10;
 
             if attempts_dump_count >= MAX_ATTEMPTS_DUMP_COUNT {
                 break;
             }
 
             attempts_dump = format!("{}{}\n", attempts_dump, attempt.dump(desc));
-            attempts_dump_count += 1;
         }
 
-        if attempts_dump != "" {
+        if !attempts_dump.is_empty() {
             result = format!("{}    - attempts:\n{}", result, attempts_dump);
         } else {
             result = format!("{}    - attempts: N/A\n", result);
@@ -918,9 +892,9 @@ impl Merge<PoolPtr<dyn RoundState>> for PoolPtr<dyn RoundState> {
                 }
 
                 if last_precommit_attempt_sequence_number > diversed_voted_attempts[1] {
-                    return last_precommit_attempt_sequence_number;
+                    last_precommit_attempt_sequence_number
                 } else {
-                    return 0;
+                    0
                 }
             },
         );
@@ -1036,11 +1010,11 @@ impl CacheObject<RoundStateImpl> for RoundStateImpl {
         self.sequence_number == value.sequence_number
             && self.hash == value.hash
             && self.precommitted_block == value.precommitted_block
-            && &self.first_attempt == &value.first_attempt
-            && &self.last_precommit == &value.last_precommit
-            && &self.sent_blocks == &value.sent_blocks
-            && &self.signatures == &value.signatures
-            && &self.attempts == &value.attempts
+            && self.first_attempt == value.first_attempt
+            && self.last_precommit == value.last_precommit
+            && self.sent_blocks == value.sent_blocks
+            && self.signatures.eq(&value.signatures)
+            && self.attempts == value.attempts
     }
 }
 
@@ -1104,12 +1078,10 @@ impl RoundStateImpl {
             let current_attempt = attempts.at(middle as usize);
             let current_attempt_attempt_id = current_attempt.get_sequence_number();
 
-            if current_attempt_attempt_id < attempt_id {
-                left = middle;
-            } else if current_attempt_attempt_id > attempt_id {
-                right = middle;
-            } else {
-                return Some(current_attempt.clone());
+            match current_attempt_attempt_id.cmp(&attempt_id) {
+                std::cmp::Ordering::Less => left = middle,
+                std::cmp::Ordering::Greater => right = middle,
+                std::cmp::Ordering::Equal => return Some(current_attempt.clone()),
             }
         }
 
@@ -1171,7 +1143,7 @@ impl RoundStateImpl {
         let state = get_impl(&*default_state);
         let default_state = default_state.clone();
 
-        let new_round_state = match message {
+        match message {
             ton::Message::ValidatorSession_Message_SubmittedBlock(message) => state
                 .apply_submitted_block_action(
                     desc,
@@ -1191,9 +1163,7 @@ impl RoundStateImpl {
             ton::Message::ValidatorSession_Message_Commit(message) => state
                 .apply_committed_block_action(desc, src_idx, attempt_id, message, default_state),
             _ => state.apply_action_on_attempt(desc, src_idx, attempt_id, message, default_state),
-        };
-
-        new_round_state
+        }
     }
 
     fn apply_submitted_block_action(
@@ -1239,9 +1209,9 @@ impl RoundStateImpl {
         let sent_block = SessionFactory::create_sent_block(
             desc,
             src_idx,
-            message.root_hash.clone().into(),
-            message.file_hash.clone().into(),
-            message.collated_data_file_hash.clone().into(),
+            message.root_hash.clone(),
+            message.file_hash.clone(),
+            message.collated_data_file_hash.clone(),
             block_creation_time,
             block_payload_creation_time,
         );
@@ -1282,7 +1252,7 @@ impl RoundStateImpl {
 
         log::trace!("...applying approved block action");
 
-        let candidate_id: BlockId = message.candidate.clone().into();
+        let candidate_id: BlockId = message.candidate.clone();
 
         //check if we know the incoming block
 
@@ -1359,15 +1329,13 @@ impl RoundStateImpl {
                 );
                 return default_state;
             }
-        } else {
-            if message.signature.len() != 0 {
-                log::warn!(
-                    "Node {} invalid signature has been received (expected unsigned block): {:?}",
-                    desc.get_source_public_key_hash(src_idx),
-                    message
-                );
-                return default_state;
-            }
+        } else if !message.signature.is_empty() {
+            log::warn!(
+                "Node {} invalid signature has been received (expected unsigned block): {:?}",
+                desc.get_source_public_key_hash(src_idx),
+                message
+            );
+            return default_state;
         }
 
         //create empty block if empty candidate ID has been received
@@ -1386,7 +1354,7 @@ impl RoundStateImpl {
 
         let signature = SessionFactory::create_block_candidate_signature(
             desc,
-            message.signature.to_vec().into(),
+            message.signature.to_vec(),
         );
         let sent_block = sent_block.unwrap().push(desc, src_idx, signature);
         let new_sent_blocks = self.sent_blocks.push(desc, sent_block);
@@ -1479,7 +1447,7 @@ impl RoundStateImpl {
             return default_state;
         }
 
-        let candidate_id: BlockId = message.candidate.clone().into();
+        let candidate_id: BlockId = message.candidate.clone();
         let precommitted_block = self.precommitted_block.as_ref().unwrap();
         let block_id = precommitted_block.get_id();
 
@@ -1508,8 +1476,8 @@ impl RoundStateImpl {
 
         //check if node's signature
 
-        if &candidate_id == &*SKIP_ROUND_CANDIDATE_BLOCKID {
-            if message.signature.len() != 0 {
+        if candidate_id == *SKIP_ROUND_CANDIDATE_BLOCKID {
+            if !message.signature.is_empty() {
                 log::warn!(
                     "Node {} sent an invalid signature: {:?}; \
                     attempt to sign a skip round candidate",
@@ -1754,7 +1722,7 @@ impl RoundStateImpl {
             made_changes = true;
 
             let first_attempt = first_attempt.change(desc, src_idx as usize, attempt_id);
-            let new_round_state = Self::create(
+            Self::create(
                 desc,
                 state.precommitted_block.clone(),
                 state.sequence_number,
@@ -1763,9 +1731,7 @@ impl RoundStateImpl {
                 state.sent_blocks.clone(),
                 state.signatures.clone(),
                 state.attempts.clone(),
-            );
-
-            new_round_state
+            )
         } else {
             default_state
         };
@@ -1870,18 +1836,13 @@ impl RoundStateImpl {
     */
 
     fn get_candidate(&self, block_id: &BlockId) -> Option<BlockCandidatePtr> {
-        if self.sent_blocks.is_none() {
-            return None;
-        }
-
-        let candidates = self.sent_blocks.as_ref().unwrap();
-
-        for block_candidate in candidates.iter() {
-            if block_candidate.get_id() == block_id {
-                return Some(block_candidate.clone());
+        if let Some(candidates) = self.sent_blocks.as_ref() {
+            for block_candidate in candidates.iter() {
+                if block_candidate.get_id() == block_id {
+                    return Some(block_candidate.clone());
+                }
             }
         }
-
         None
     }
 
@@ -1902,14 +1863,14 @@ impl RoundStateImpl {
     ) -> Self {
         Self {
             pool: SessionPool::Temp,
-            precommitted_block: precommitted_block,
-            sequence_number: sequence_number,
-            first_attempt: first_attempt,
-            last_precommit: last_precommit,
-            sent_blocks: sent_blocks,
-            signatures: signatures,
-            attempts: attempts,
-            hash: hash,
+            precommitted_block,
+            sequence_number,
+            first_attempt,
+            last_precommit,
+            sent_blocks,
+            signatures,
+            attempts,
+            hash,
             instance_counter: instance_counter.clone(),
         }
     }

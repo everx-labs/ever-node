@@ -94,7 +94,7 @@ impl ActivityNodeImpl {
         let body = Self {
             manager: Arc::downgrade(&manager_wrapper),
             id: manager.generate_id(),
-            name: name,
+            name,
             creation_time: SystemTime::now(),
             access_time: Arc::new(AtomicU64::new(0)),
         };
@@ -194,7 +194,7 @@ impl ActivityNodeManager {
 
     /// Generate node ID
     fn generate_id(&mut self) -> NodeId {
-        const MAX_ID: NodeId = std::u64::MAX;
+        const MAX_ID: NodeId = u64::MAX;
 
         assert!(self.current_node_id < MAX_ID);
 
@@ -259,7 +259,7 @@ impl ActivityNodeManager {
 
     /// Dump active nodes
     fn dump(nodes: HashMap<NodeId, Weak<dyn ActivityNode>>) {
-        if nodes.len() == 0 {
+        if nodes.is_empty() {
             log::info!("No Catchain activity nodes have been found");
             return;
         }

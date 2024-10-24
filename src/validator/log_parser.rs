@@ -25,16 +25,13 @@ impl LogParser {
     pub fn new (s: &str) -> Self {
         let mut prepared_str = " ".to_string();
         prepared_str.push_str(s);
-        prepared_str.push_str(" ");
+        prepared_str.push(' ');
         LogParser { log: prepared_str }
     }
 
     pub fn get_field (&self, name: &str) -> Option <String> {
         let it = Regex::new (&(format! (" {} = ([^ ]*) ", escape(name)))).unwrap();
-        match it.captures (&self.log) {
-            None => None,
-            Some (group) => Some (group.get(1).unwrap().as_str().to_string())
-        }
+        it.captures (&self.log).map(|group| group.get(1).unwrap().as_str().to_string())
     }
 
     pub fn parse_field_fromstr <T> (&self, name: &str) -> T

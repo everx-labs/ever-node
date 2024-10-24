@@ -93,10 +93,10 @@ async fn test_storage_cell_migration_to_v6_1() -> Result<()> {
     let cell = StorageCell::deserialize(&boc_db, &hashes[1], &v6_data, false)?;
 
     assert!(cell.cell_type() == CellType::Ordinary);
-    assert!(cell.data() == &data);
+    assert!(cell.data() == data);
     assert!(cell.level() == 1);
     assert!(cell.references_count() == 2);
-    assert!(cell.store_hashes() == false);
+    assert!(!cell.store_hashes());
     assert!(cell.hash(0) == hashes[0]);
     assert!(cell.hash(1) == hashes[1]);
     assert!(cell.depth(0) == 3);
@@ -157,7 +157,7 @@ async fn test_storage_cell_migration_to_v6_2() -> Result<()> {
     assert!(cell.data() == &data[..data.len() - 1]);
     assert!(cell.level() == 1);
     assert!(cell.references_count() == 0);
-    assert!(cell.store_hashes() == false);
+    assert!(!cell.store_hashes());
     assert!(cell.hash(MAX_LEVEL) == repr_hash);
     assert!(cell.hash(0) == UInt256::from_slice(&data[2..34]));
     assert!(cell.depth(MAX_LEVEL) == 0);
@@ -221,7 +221,7 @@ async fn test_storage_cell_migration_to_v6_3() -> Result<()> {
     assert!(cell.data() == &data[..data.len() - 1]);
     assert!(cell.level() == 2);
     assert!(cell.references_count() == 0);
-    assert!(cell.store_hashes() == false);
+    assert!(!cell.store_hashes());
     assert!(cell.hash(MAX_LEVEL) == repr_hash);
     assert!(cell.hash(0) == UInt256::from_slice(&data[2..34]));
     assert!(cell.hash(1) == UInt256::from_slice(&data[34..66]));
@@ -253,7 +253,7 @@ async fn test_storage_cell_migration_to_v6_4() -> Result<()> {
         2, // refs count
         true, // store hashes
         Some(hashes.clone()),
-        Some(depths.clone())
+        Some(depths)
     )?;
 
     let mut v5_data = Vec::new();
@@ -314,7 +314,7 @@ async fn test_storage_cell_migration_to_v6_5() -> Result<()> {
         4, // refs count
         true, // store hashes
         Some(hashes.clone()),
-        Some(depths.clone())
+        Some(depths)
     )?;
 
     let mut v5_data = Vec::new();
@@ -343,8 +343,8 @@ async fn test_storage_cell_migration_to_v6_5() -> Result<()> {
     assert!(cell.level() == 0);
     assert!(cell.level_mask().mask() == 0);
     assert!(cell.references_count() == 4);
-    for i in 0..4 {
-        assert!(cell.reference_repr_hash(i)? == refs[i]);
+    for (i, reference) in refs.into_iter().enumerate() {
+        assert!(cell.reference_repr_hash(i)? == reference);
     }
     assert!(cell.store_hashes());
     assert!(cell.hash(MAX_LEVEL) == hashes[0]);
@@ -374,7 +374,7 @@ async fn test_storage_cell_migration_to_v6_6() -> Result<()> {
         4, // refs count
         true, // store hashes
         Some(hashes.clone()),
-        Some(depths.clone())
+        Some(depths)
     )?;
 
     let mut v5_data = Vec::new();
@@ -403,8 +403,8 @@ async fn test_storage_cell_migration_to_v6_6() -> Result<()> {
     assert!(cell.level() == 0);
     assert!(cell.level_mask().mask() == 0);
     assert!(cell.references_count() == 4);
-    for i in 0..4 {
-        assert!(cell.reference_repr_hash(i)? == refs[i]);
+    for (i, reference) in refs.into_iter().enumerate() {
+        assert!(cell.reference_repr_hash(i)? == reference);
     }
     assert!(cell.store_hashes());
     assert!(cell.hash(MAX_LEVEL) == hashes[0]);

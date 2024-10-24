@@ -84,6 +84,7 @@ pub struct ShardStatesKeeper {
 
 impl ShardStatesKeeper {
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<InternalDb>,
         enable_shard_state_persistent_gc: bool,
@@ -188,7 +189,7 @@ impl ShardStatesKeeper {
     }
 
     #[async_recursion::async_recursion]
-    pub async fn load_state(self: &Arc<Self>, block_id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
+    pub async fn load_state(self: &'async_recursion Arc<Self>, block_id: &BlockIdExt) -> Result<Arc<ShardStateStuff>> {
         log::trace!("load_state {}", block_id);
         if let Some(state) = self.states.get(block_id) {
             log::trace!("load_state {} FROM CACHE", block_id);
@@ -273,7 +274,7 @@ impl ShardStatesKeeper {
 
         if let Some(state_data) = persistent_state {
             // while boot - zerostate and init persistent state are saved using this parameter 
-            self.db.store_shard_state_persistent_raw(&handle, state_data, None).await?;
+            self.db.store_shard_state_persistent_raw(handle, state_data, None).await?;
         }
 
         // if state was already saved (by callback) - do nothitng
@@ -474,7 +475,7 @@ impl ShardStatesKeeper {
                 fail!("restore_state_recursive: max depth achived on id {}", handle.id());
             }
 
-            let block = self.db.load_block_data(&handle).await?;
+            let block = self.db.load_block_data(handle).await?;
             let prev_root = match block.construct_prev_id()? {
                 (prev, None) => {
                     let handle = self.db.load_block_handle(&prev)?.ok_or_else(
@@ -532,7 +533,7 @@ impl ShardStatesKeeper {
                 }
             ).await??;
 
-            self.store_state(&handle, state.clone(), None, true).await?;
+            self.store_state(handle, state.clone(), None, true).await?;
 
             stack.pop().ok_or_else(|| error!("INTERNAL ERROR: restore_state_recursive: stask is empty when pop()"))?;
 
@@ -625,11 +626,9 @@ impl ShardStatesKeeper {
                     let now = std::time::Instant::now();
                     for guard in &self.states {
                         total += 1;
-                        if self.cache_resolver.allow_state_gc(0, &guard.0, 0, 0)? {
-                            if guard.val().1.has_saved_state() {
-                                self.states.remove(&guard.0);
-                                cleaned +=1;
-                            }
+                        if self.cache_resolver.allow_state_gc(0, &guard.0, 0, 0)? && guard.val().1.has_saved_state() {
+                            self.states.remove(&guard.0);
+                            cleaned +=1;
                         }
                     }
                     log::debug!(
@@ -692,7 +691,7 @@ impl ShardStatesKeeper {
                     log::trace!("Persistent state is skipped due to config {}", handle.id());
                 } else {
                     // store states
-                    self.save_persistent_state(&engine, handle.clone()).await?;
+                    self.save_persistent_state(engine, handle.clone()).await?;
 
                     // gc iteration for persistent/stored states
 

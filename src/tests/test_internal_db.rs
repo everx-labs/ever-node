@@ -74,9 +74,7 @@ async fn stop_db(db: &InternalDb) {
 
 async fn clean_up(may_fail: bool, test_name: &str) {
     loop {
-        if std::fs::remove_dir_all(format!("{}/{}", DB_PATH, test_name)).is_ok() {
-            break
-        } else if may_fail {
+        if may_fail || std::fs::remove_dir_all(format!("{}/{}", DB_PATH, test_name)).is_ok() {
             break
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -247,7 +245,7 @@ async fn test_store_block_data() {
     }
     test_store_with_clean(
         "test_store_block_data",
-        | | prepare_block_only(),
+        prepare_block_only,
         |c| Box::pin(c.db.store_block_data(&c.data.block, Some(c.wait.clone()))),
         |_| Ok(()),
         |j| Box::pin(check(j)) 
@@ -264,10 +262,10 @@ async fn test_store_block_proof() {
     }
     test_store_with_clean(
         "test_store_block_data",
-        | | prepare_block_proof(),
+        prepare_block_proof,
         |c| Box::pin(
             c.db.store_block_proof(
-                &c.data.extra.id(), None, &c.data.extra, Some(c.wait.clone())
+                c.data.extra.id(), None, &c.data.extra, Some(c.wait.clone())
             )
         ),
         |_| Ok(()),
@@ -279,7 +277,7 @@ async fn test_store_block_proof() {
 async fn test_store_block_prev1() {
     test_store_flag_with_clean(
         "test_store_block_prev1",
-        | | prepare_block_with_prev(),
+        prepare_block_with_prev,
         |j| j.ctx.db.store_block_prev1(&j.handle, j.ctx.data.extra.id(), Some(j.ctx.wait.clone())),
         |j| {
             assert!(j.handle.has_prev1());
@@ -294,7 +292,7 @@ async fn test_store_block_prev1() {
 async fn test_store_block_prev2() {
     test_store_flag_with_clean(
         "test_store_block_prev2",
-        | | prepare_block_with_prev(),
+        prepare_block_with_prev,
         |j| j.ctx.db.store_block_prev2(&j.handle, j.ctx.data.extra.id(), Some(j.ctx.wait.clone())),
         |j| {
             assert!(j.handle.has_prev2());
@@ -309,7 +307,7 @@ async fn test_store_block_prev2() {
 async fn test_store_block_next1() {
     test_store_flag_with_clean(
         "test_store_block_next1",
-        | | prepare_block_with_next(),
+        prepare_block_with_next,
         |j| j.ctx.db.store_block_next1(&j.handle, j.ctx.data.extra.id(), Some(j.ctx.wait.clone())),
         |j| {
             assert!(j.handle.has_next1());
@@ -324,7 +322,7 @@ async fn test_store_block_next1() {
 async fn test_store_block_next2() {
     test_store_flag_with_clean(
         "test_store_block_next2",
-        | | prepare_block_with_next(),
+        prepare_block_with_next,
         |j| j.ctx.db.store_block_next2(&j.handle, j.ctx.data.extra.id(), Some(j.ctx.wait.clone())),
         |j| {
             assert!(j.handle.has_next2());
@@ -339,7 +337,7 @@ async fn test_store_block_next2() {
 async fn test_store_block_applied() {
     test_store_flag_with_clean(
         "test_store_block_applied",
-        | | prepare_block_only(),
+        prepare_block_only,
         |j| j.ctx.db.store_block_applied(&j.handle, Some(j.ctx.wait.clone())).map(|_| ()),
         |j| {
             assert!(j.handle.is_applied());
@@ -540,7 +538,7 @@ const MC_BLOCKS: u32 = 100;
 
 fn gen_block_id_ext(shard: ShardIdent, seq_no: u32) -> BlockIdExt {
     let buf = sha256_digest_slices(
-        &vec![
+        &[
             &shard.workchain_id().to_be_bytes()[..],
             &shard.shard_prefix_with_tag().to_be_bytes()[..],
             &seq_no.to_be_bytes()[..]
@@ -587,7 +585,7 @@ async fn test_archives_multithread() {
             }
         }
         let handle = db.store_block_data(
-            &BlockStuff::fake_block(id.clone(), mc.map(|mc| mc.clone()), false)?,
+            &BlockStuff::fake_block(id.clone(), mc.cloned(), false)?,
             None
         ).await?.to_any();
         let handle = db.store_block_proof(
@@ -697,7 +695,7 @@ async fn test_archives_singlethread() {
             }
         }
         let h = db.store_block_data(
-            &BlockStuff::fake_block(id.clone(), mc.map(|mc| mc.clone()), false)?,
+            &BlockStuff::fake_block(id.clone(), mc.cloned(), false)?,
             None
         ).await?.to_any();
         Ok(h)

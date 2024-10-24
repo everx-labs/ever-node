@@ -153,7 +153,7 @@ impl Block {
     /// Is block delivered
     pub fn is_delivered(
         &self,
-        validators: &Vec<ValidatorDescr>,
+        validators: &[ValidatorDescr],
         cutoff_weight: ValidatorWeight,
     ) -> bool {
         let delivered_weight = self.deliveries_signature.get_total_weight(validators);
@@ -178,10 +178,7 @@ impl Block {
 
     /// Block creation time
     pub fn get_creation_time(&self) -> Option<std::time::SystemTime> {
-        match self.created_timestamp {
-            Some(value) => Some(std::time::UNIX_EPOCH + std::time::Duration::from_millis(value as u64)),
-            None => None
-        }
+        self.created_timestamp.map(|value| std::time::UNIX_EPOCH + std::time::Duration::from_millis(value as u64))
     }
 
     /// Get block delivery latency
@@ -290,7 +287,7 @@ impl Block {
         let mut rng = rand::thread_rng();
 
         for _i in 0..max_nodes_count {
-            let idx = rng.gen_range(0, result.len());
+            let idx = rng.gen_range(0..result.len());
             shuffled_result.push(result[idx]);
             result.remove(idx);
         }
@@ -447,11 +444,11 @@ impl Block {
     pub fn status(&self) -> BlockCandidateStatus {
         BlockCandidateStatus {
             id: self.block_id.clone(),
-            deliveries_signature: self.deliveries_signature.serialize().into(),
-            approvals_signature: self.approvals_signature.serialize().into(),
-            rejections_signature: self.rejections_signature.serialize().into(),
+            deliveries_signature: self.deliveries_signature.serialize(),
+            approvals_signature: self.approvals_signature.serialize(),
+            rejections_signature: self.rejections_signature.serialize(),
             merges_cnt: (self.merges_count + 1) as i32, //increase number of merges before send
-            created_timestamp: match self.created_timestamp { Some (value) => value, None => 0 },
+            created_timestamp: self.created_timestamp.unwrap_or_default(),
         }
     }
 
@@ -469,6 +466,11 @@ impl Block {
         self.serialized_block_status = Some(serialized_block_status.clone());
 
         serialized_block_status
+    }
+
+    /// Invalidate serialized block status
+    fn invalidate_serialized_block_status(&mut self) {
+        self.serialized_block_status = None;
     }
 
     /// Update status of the block (returns true, if the block should be updated in the network)
@@ -502,6 +504,8 @@ impl Block {
             self.rejections_signature = new_rejections_signature;
 
             self.signatures_hash = new_hash;
+
+            self.invalidate_serialized_block_status();
         }
 
         Ok(new_hash != prev_hash)
@@ -522,7 +526,7 @@ impl Block {
         created_timestamp: i64,
     ) -> Result<(bool, bool)> {
         let prev_self_hash = self.get_signatures_hash();
-        let prev_other_hash = Self::compute_hash(&deliveries_signature, &approvals_signature, &rejections_signature);
+        let prev_other_hash = Self::compute_hash(deliveries_signature, approvals_signature, rejections_signature);
 
         let mut new_deliveries_signature = self.deliveries_signature.clone();
         let mut new_approvals_signature = self.approvals_signature.clone();
@@ -547,6 +551,8 @@ impl Block {
             }
 
             self.signatures_hash = new_hash;
+
+            self.invalidate_serialized_block_status();
         }
 
         self.set_creation_timestamp(created_timestamp);        
@@ -570,20 +576,6 @@ impl Block {
         rejections_signature.get_hash()
     }
 
-    /// Update hash
-    fn update_hash(&mut self) {
-        let prev_hash = self.signatures_hash;
-
-        self.signatures_hash = Self::compute_hash(
-            &self.deliveries_signature,
-            &self.approvals_signature,
-            &self.rejections_signature);
-
-        if self.signatures_hash != prev_hash {
-            self.serialized_block_status = None;
-        }
-    }
-
     /// Does this block have a candidate received
     pub fn has_candidate(&self) -> bool {
         self.block_candidate.is_some()
@@ -598,7 +590,7 @@ impl Block {
         }
 
         let cur_block_candidate = self.block_candidate.as_ref().unwrap();
-        if &new_block_candidate.hash != &cur_block_candidate.hash {
+        if new_block_candidate.hash != cur_block_candidate.hash {
             warn!(target: "verificator", "Attempt to update block candidate {:?} body with a new data: prev={:?}, new={:?}", self.block_id, cur_block_candidate.hash, new_block_candidate.hash);
             return false;
         }
@@ -617,13 +609,20 @@ impl Block {
     ) -> Arc<SpinMutex<Self>> {
         let candidate_id = Workchain::get_candidate_id(block_id);
 
-        let mut body = Self {
+        let deliveries_signature = MultiSignature::new(1, candidate_id.clone());
+        let approvals_signature = MultiSignature::new(2, candidate_id.clone());
+        let rejections_signature = MultiSignature::new(3, candidate_id.clone());
+
+        let body = Self {
             block_id: block_id.clone(),
             block_candidate: None,
-            deliveries_signature: MultiSignature::new(1, candidate_id.clone()),
-            approvals_signature: MultiSignature::new(2, candidate_id.clone()),
-            rejections_signature: MultiSignature::new(3, candidate_id.clone()),
-            signatures_hash: 0,
+            signatures_hash: Self::compute_hash(
+                &deliveries_signature,
+                &approvals_signature,
+                &rejections_signature),
+            deliveries_signature,
+            approvals_signature,
+            rejections_signature,
             serialized_block_status: None,
             created_timestamp: None,
             merges_count: 0,
@@ -649,8 +648,6 @@ impl Block {
             delivery_stats: BlockDeliveryStats::default(),
             block_start_sync_time: SystemTime::now(),
         };
-
-        body.update_hash();
 
         Arc::new(SpinMutex::new(body))
     }

@@ -214,7 +214,7 @@ impl MsgEnqueueStuff {
         &self.env.msg
     }
     pub fn out_msg_key(&self) -> OutMsgQueueKey {
-        OutMsgQueueKey::with_account_prefix(&self.next_prefix(), self.message_hash())
+        OutMsgQueueKey::with_account_prefix(self.next_prefix(), self.message_hash())
     }
     pub fn dst_account_id(&self) -> Result<AccountId> {
         self.message()
@@ -278,7 +278,7 @@ pub fn perform_hypercube_routing(
             fail!("Shard {} must fully contain transit prefix {}", cur_shard, transit)
         }
 
-        if cur_shard.contains_full_prefix(&dest) {
+        if cur_shard.contains_full_prefix(dest) {
             // If destination is in this shard, set cur:=next_hop:=dest
             return Ok((IntermediateAddress::full_dest(), IntermediateAddress::full_dest()))
         }
@@ -299,7 +299,7 @@ pub fn perform_hypercube_routing(
         let q = dest.prefix ^ t;
         // Top i bits match, next 4 bits differ:
         let mut i = q.leading_zeros() as u8 & 0xFC;
-        let mut m = u64::max_value() >> i;
+        let mut m = u64::MAX >> i;
         while i < 60 {
             m >>= 4;
             let h = t ^ (q & !m);
@@ -311,7 +311,7 @@ pub fn perform_hypercube_routing(
             }
         }
         fail!("cannot perform hypercube routing from {} to {} via {}", src, dest, cur_shard)
-    } else if cur_shard.contains_full_prefix(&dest) {
+    } else if cur_shard.contains_full_prefix(dest) {
         Ok((IntermediateAddress::full_dest(), IntermediateAddress::full_dest()))
     } else {
         Ok((IntermediateAddress::default(), IntermediateAddress::full_dest()))

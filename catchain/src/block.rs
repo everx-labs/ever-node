@@ -137,16 +137,16 @@ impl BlockImpl {
         extra_id: BlockExtraId,
     ) -> BlockPtr {
         let body = BlockImpl {
-            source_id: source_id,
-            fork_id: fork_id,
-            source_public_key_hash: source_public_key_hash,
-            height: height,
-            hash: hash,
+            source_id,
+            fork_id,
+            source_public_key_hash,
+            height,
+            hash,
             prev: prev_block,
-            payload: payload,
-            block_deps: block_deps,
-            forks_dep_heights: forks_dep_heights,
-            extra_id: extra_id,
+            payload,
+            block_deps,
+            forks_dep_heights,
+            extra_id,
             creation_time: std::time::SystemTime::now(),
         };
 
@@ -166,17 +166,17 @@ impl BlockImpl {
             ),
             prev: None,
             payload: CatchainFactory::create_empty_block_payload(),
-            block_deps: [].to_vec(),
-            forks_dep_heights: [].to_vec(),
-            extra_id: extra_id,
+            block_deps: Vec::new(),
+            forks_dep_heights: Vec::new(),
+            extra_id,
             creation_time: std::time::SystemTime::now(),
         };
 
         for line in dump.lines() {
-            let v: Vec<&str> = line.split('=').collect();
-            if v.len() == 2 {
-                let id = v.get(0).unwrap().trim();
-                let value = v.get(1).unwrap().trim();
+            let mut v = line.split('=');
+            if let (Some(id), Some(value), None) = (v.next(), v.next(), v.next()) {
+                let id = id.trim();
+                let value = value.trim();
 
                 if id == "src" {
                     body.source_id = FromStr::from_str(value).unwrap();
