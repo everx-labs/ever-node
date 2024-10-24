@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.60.7
+
+- Fixed the previous block reference in the block proof after shards merge
+
 ## Version 0.60.6
 
 - Fixed clippy warnings
