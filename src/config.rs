@@ -296,7 +296,7 @@ impl RempConfig {
     }
 
     pub fn get_max_incoming_broadcast_delay_millis(&self) -> u32 { self.max_incoming_broadcast_delay_millis.unwrap_or(1000) }
-
+/*
     pub fn get_catchain_options(&self) -> Option<catchain::Options> {
         if self.is_service_enabled() {
             let opts = catchain::Options {
@@ -309,7 +309,7 @@ impl RempConfig {
             None
         }
     }
-
+*/
     pub fn remp_client_pool(&self) -> Option<u8> {
         self.remp_client_pool
     }

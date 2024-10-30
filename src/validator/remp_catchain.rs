@@ -14,7 +14,9 @@
 use std::{collections::{HashMap, HashSet}, sync::{Arc, OnceLock}};
 use std::fmt::{Display, Formatter, Write};
 use std::ops::RangeInclusive;
+use std::sync::atomic::AtomicI32;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use dashmap::DashMap;
 
 use crate::{
     engine_traits::EngineOperations,
@@ -30,11 +32,11 @@ use crate::{
 };
 
 use catchain::{
-    serialize_tl_boxed_object,
-    BlockPayloadPtr, BlockPtr, CatchainFactory, CatchainListener, CatchainNode, 
-    CatchainOverlayManagerPtr, CatchainPtr, ExternalQueryResponseCallback, PrivateKey,
+    serialize_tl_boxed_object, BlockPayloadPtr, BlockPtr, CatchainFactory, CatchainListener,
+    CatchainNode, CatchainOverlayManagerPtr, CatchainPtr, ExternalQueryResponseCallback, PrivateKey,
     PublicKey, PublicKeyHash
 };
+
 use ton_api::{
     IntoBoxed, ton::ton_node::{RempCatchainRecordV2, RempMessageQuery}
 };
@@ -99,13 +101,15 @@ impl RempCatchainInstanceImpl {
 
 pub struct RempCatchainInstance {
     id: SystemTime,
+    block_payload_seqno: AtomicI32,
+    received_payloads: DashMap<(i32, u32), SystemTime>,
     info: Arc<RempCatchainInfo>,
     instance_impl: OnceLock<Arc<RempCatchainInstanceImpl>>,
 }
 
 impl RempCatchainInstance {
     pub fn new(info: Arc<RempCatchainInfo>) -> Self {
-        Self { id: SystemTime::now(), info, instance_impl: OnceLock::new() }
+        Self { id: SystemTime::now(), info, block_payload_seqno: AtomicI32::new(0), received_payloads: DashMap::new(), instance_impl: OnceLock::new() }
     }
 
     pub fn init_instance(&self, instance: Arc<RempCatchainInstanceImpl>) {
@@ -407,8 +411,6 @@ impl RempCatchainInfo {
             self.nodes.len() == other.nodes.len() &&
             self.nodes.iter().zip (other.nodes.iter()).all(|(a,b)| a.adnl_id == b.adnl_id);
 
-        
-
         self.queue_id == other.queue_id &&
             self.general_session_info == other.general_session_info &&
             self.local_idx == other.local_idx &&
@@ -469,7 +471,7 @@ impl RempCatchain {
         })
     }
 
-    pub async fn start(self: Arc<RempCatchain>, local_key: PrivateKey) -> Result<CatchainPtr> {
+    pub async fn start(self: Arc<RempCatchain>, local_key: PrivateKey, catchain_options: &catchain::Options) -> Result<CatchainPtr> {
         let overlay_manager: CatchainOverlayManagerPtr =
             Arc::new(CatchainOverlayManagerImpl::new(self.engine.validator_network(), self.info.node_list_id.clone()));
         let db_root = format!("{}/rmq", self.engine.db_root_dir()?);
@@ -484,12 +486,12 @@ impl RempCatchain {
             self.info.nodes.iter().map(|x| x.adnl_id.to_string()).collect::<Vec<String>>()
         );
 
-        let rmq_catchain_options = self.remp_manager.options.get_catchain_options().ok_or_else(
-            || error!("RMQ {}: cannot get REMP catchain options, start is impossible", self)
-        )?;
+        //let rmq_catchain_options = self.remp_manager.options.get_catchain_options().ok_or_else(
+        //    || error!("RMQ {}: cannot get REMP catchain options, start is impossible", self)
+        //)?;
 
         let catchain_ptr = CatchainFactory::create_catchain(
-            &rmq_catchain_options,
+            catchain_options,
             &self.info.queue_id,
             self.info.nodes.to_vec(),
             &local_key,
@@ -524,8 +526,14 @@ impl RempCatchain {
 
         match pld {
             Ok(::ton_api::ton::validator_session::BlockUpdate::ValidatorSession_BlockUpdate(pld)) => {
+                if let Some(prev) = self.instance.received_payloads.insert((pld.state, source_idx), SystemTime::now()) {
+                    log::error!(target: "remp", "Point 4. RMQ {}: payload {} from {} was already received at {:?}", self, pld.state, source_idx, prev);
+                    return
+                }
+
                 #[cfg(feature = "telemetry")]
                 let mut total = 0;
+
                 for msgbx in pld.actions.iter() {
                     match msgbx {
                         ::ton_api::ton::validator_session::round::Message::ValidatorSession_Message_Commit(msg) => {
@@ -573,7 +581,7 @@ impl RempCatchain {
         Ok(rmqrecord.message_id.clone())
     }
 
-    pub fn pack_payload(messages_to_pack: &[RempCatchainRecordV2]) -> (BlockPayloadPtr, Vec<String>) {
+    pub fn pack_payload(messages_to_pack: &[RempCatchainRecordV2], payload_seqno: i32) -> (BlockPayloadPtr, Vec<String>) {
         let mut msg_vect: Vec<::ton_api::ton::validator_session::round::Message> = Vec::new();
         let mut msg_ids: Vec<String> = Vec::new();
 
@@ -591,7 +599,7 @@ impl RempCatchain {
         let payload = ::ton_api::ton::validator_session::blockupdate::BlockUpdate {
             ts: 0, //ts as i64,
             actions: msg_vect,
-            state: 0 //real_state_hash as i32,
+            state: payload_seqno //real_state_hash as i32,
         }.into_boxed();
 
         let serialized_payload = serialize_tl_boxed_object!(&payload);
@@ -640,7 +648,8 @@ impl CatchainListener for RempCatchain {
             messages_to_pack.push(msg);
             if messages_to_pack.len() >= REMP_CATCHAIN_RECORDS_PER_BLOCK { break }
         }
-        let (block_payload, msg_ids) = Self::pack_payload(&messages_to_pack);
+        let block_payload_seqno = self.instance.block_payload_seqno.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (block_payload, msg_ids) = Self::pack_payload(&messages_to_pack, block_payload_seqno);
 
         if block_payload.data().len() > REMP_MAX_BLOCK_PAYLOAD_LEN {
             log::warn!(target: "remp", "Point 3. RMQ {}: block payload is too big (actual {} > max {})",
@@ -651,8 +660,8 @@ impl CatchainListener for RempCatchain {
         match &self.instance.get_session() {
             Some(ctchn) => {
                 ctchn.processed_block(block_payload, false, false);
-                log::trace!(target: "remp", "Point 3. RMQ {} sent messages: '{:?}'",
-                    self, msg_ids
+                log::trace!(target: "remp", "Point 3. RMQ {} sent messages (block_payload_seqno {}): '{:?}'",
+                    self, block_payload_seqno, msg_ids
                 );
                 #[cfg(feature = "telemetry")]
                 self.engine.remp_core_telemetry().sent_to_catchain(
@@ -779,6 +788,7 @@ impl RempCatchainStore {
                                 engine: Arc<dyn EngineOperations>,
                                 remp_manager: Arc<RempManager>,
                                 to_start: Arc<RempCatchainInfo>,
+                                catchain_options: &catchain::Options,
                                 local_key: PrivateKey
     ) -> Result<Arc<RempCatchainInstanceImpl>> {
         let session_id = &to_start.queue_id;
@@ -838,7 +848,7 @@ impl RempCatchainStore {
             log::trace!(target: "remp", "Actually starting REMP catchain {:x}/{}",
                 session_id, catchain_info.info.general_session_info.shard
             );
-            let catchain_ptr = catchain_info.clone().start(local_key).await?;
+            let catchain_ptr = catchain_info.clone().start(local_key, catchain_options).await?;
             let instance_impl = Arc::new(RempCatchainInstanceImpl::new(catchain_ptr));
             catchain_info.instance.init_instance(instance_impl.clone());
             self.activate_catchain(session_id).await?;

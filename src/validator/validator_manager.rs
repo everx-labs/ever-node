@@ -555,7 +555,9 @@ impl ValidatorManagerImpl {
         self.garbage_collect_remp_sessions().await;
     }
 
-    async fn stop_and_remove_sessions(&mut self, sessions_to_remove: &HashSet<UInt256>, new_master_cc_range: Option<RangeInclusive<u32>>) {
+    async fn stop_and_remove_sessions(
+        &mut self, sessions_to_remove: &HashSet<UInt256>, new_master_cc_range: Option<RangeInclusive<u32>>, new_session_options: &validator_session::SessionOptions
+    ) {
         for id in sessions_to_remove.iter() {
             log::trace!(target: "validator_manager", "stop&remove: removing {:x}", id);
             match self.validator_sessions.get(id) {
@@ -579,7 +581,11 @@ impl ValidatorManagerImpl {
                             }
                         }
                         _ => {
-                            if let Err(e) = session.clone().stop(self.rt.clone(), new_master_cc_range.clone()).await {
+                            if let Err(e) = session.clone().stop(
+                                self.rt.clone(),
+                                new_master_cc_range.clone(),
+                                new_session_options
+                            ).await {
                                 log::error!(target: "validator_manager",
                                     "Could not stop session {:x}: `{}`", id, e);
                                     self.validator_sessions.remove(id);
@@ -786,12 +792,12 @@ impl ValidatorManagerImpl {
         Ok(())
     }
 
-    async fn disable_validation(&mut self) -> Result<()> {
+    async fn disable_validation(&mut self, session_options: &validator_session::SessionOptions) -> Result<()> {
         self.engine.set_validation_status(ValidationStatus::Disabled);
 
         let existing_validator_sessions: HashSet<UInt256> =
             self.validator_sessions.keys().cloned().collect();
-        self.stop_and_remove_sessions(&existing_validator_sessions, None).await;
+        self.stop_and_remove_sessions(&existing_validator_sessions, None, session_options).await;
         self.garbage_collect().await;
         self.engine.set_will_validate(false);
         self.engine.clear_last_rotation_block_id()?;
@@ -1016,22 +1022,22 @@ impl ValidatorManagerImpl {
     }
 
     async fn update_shards(&mut self, mc_state: Arc<ShardStateStuff>) -> Result<()> {
+        let mc_state_extra = mc_state.shard_state_extra()?;
+        let (session_options, opts_hash) = self.compute_session_options(mc_state_extra).await?;
+
         if !self.update_validator_lists(&mc_state).await? {
             log::info!(target: "validator_manager", "Current validator list is empty, validation is disabled.");
-            self.disable_validation().await?;
+            self.disable_validation(&session_options).await?;
             return Ok(())
         }
 
-        let mc_state_extra = mc_state.shard_state_extra()?;
         let last_masterchain_block = mc_state.block_id();
-
         let keyblock_seqno = if mc_state_extra.after_key_block {
             mc_state.block_id().seq_no
         } else {
             mc_state_extra.last_key_block.as_ref().map(|id| id.seq_no).expect("masterchain state must contain info about previous key block")
         };
         let mc_now: UnixTime32 = mc_state.state()?.gen_time().into();
-        let (session_options, opts_hash) = self.compute_session_options(mc_state_extra).await?;
         let catchain_config = self.read_catchain_config(&mc_state)?;
 
         self.enable_validation();
@@ -1437,7 +1443,7 @@ impl ValidatorManagerImpl {
         }
 
         log::trace!(target: "validator_manager", "starting stop&remove");
-        self.stop_and_remove_sessions(&gc_validator_sessions, Some(master_cc_range)).await;
+        self.stop_and_remove_sessions(&gc_validator_sessions, Some(master_cc_range), &session_options).await;
         log::trace!(target: "validator_manager", "starting garbage collect");
         self.garbage_collect().await;
         log::trace!(target: "validator_manager", "exiting");
@@ -1667,6 +1673,7 @@ impl ValidatorManagerImpl {
 
         if verification::DEBUG_NACK_APPEARENCE {
             use rand::Rng;
+
             if rand::thread_rng().gen_range(0..100) < 20 {
                 log::warn!(target: "verificator", "Block {:?} verification error: random error", candidate_id);
                 return false;

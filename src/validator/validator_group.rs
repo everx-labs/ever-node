@@ -55,7 +55,7 @@ use crate::validator::reliable_message_queue::RempQueueCollatorInterfaceImpl;
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::SlashingManagerPtr;
 //#[cfg(feature = "fast_finality")]
-use crate::validator::validator_utils::PrevBlockHistory;
+use crate::validator::validator_utils::{construct_remp_catchain_options_from_config, PrevBlockHistory};
 // #[cfg(feature = "fast_finality")]
 // use crate::validator::workchains_fast_finality::compute_actual_finish;
 
@@ -202,6 +202,7 @@ impl ValidatorGroupImpl {
                     g.engine.clone(), remp_manager.clone(), g.shard().clone(),
                     &g.local_key
                 );
+                let remp_catchain_options = construct_remp_catchain_options_from_config(&g.config);
                 if let Err(error) = rq.set_queues(
                     g.general_session_info.clone(),
                     g.validator_list_id.clone(),
@@ -216,7 +217,7 @@ impl ValidatorGroupImpl {
 
                 let local_key = g.local_key.clone();
                 rt.clone().spawn(async move {
-                    match reliable_queue_clone.start(local_key).await {
+                    match reliable_queue_clone.start(local_key, &remp_catchain_options).await {
                         Ok(()) => (),
                         Err(e) => log::error!(target: "validator", "Cannot start RMQ {}: {}",
                            reliable_queue_clone.info_string().await, e
@@ -460,6 +461,7 @@ impl ValidatorGroup {
 
         if let Some(rmq) = rmq {
             log::debug!(target: "validator", "Adding next validators (add_new_queue) {}", self.info().await);
+
             rmq.add_new_queue(
                 next_master_cc_range,
                 prev_validators,
@@ -473,11 +475,12 @@ impl ValidatorGroup {
         Ok(())
     }
 
-    pub async fn stop(self: Arc<ValidatorGroup>, rt: tokio::runtime::Handle, new_master_cc_range: Option<RangeInclusive<u32>>) -> Result<()> {
+    pub async fn stop(self: Arc<ValidatorGroup>, rt: tokio::runtime::Handle, new_master_cc_range: Option<RangeInclusive<u32>>, new_session_options: &validator_session::SessionOptions) -> Result<()> {
         self.set_status(ValidatorGroupStatus::Stopping).await?;
         log::debug!(target: "validator", "Stopping group: {}", self.info().await);
         let group_impl = self.group_impl.clone();
         let self_clone = self.clone();
+        let new_remp_catchain_options = construct_remp_catchain_options_from_config(new_session_options);
         rt.spawn({
             async move {
                 log::debug!(target: "validator", "Stopping group (spawn): {}", self_clone.info().await);
@@ -489,7 +492,7 @@ impl ValidatorGroup {
                     log::debug!(target: "validator", "Stopping group (spawn) {}, rmq: {}", self_clone.info().await, rmq);
                     if let Some(new_cc_range) = new_master_cc_range {
                         log::debug!(target: "validator", "Forwarding messages, rmq: {}, new cc range: {:?}", rmq, new_cc_range);
-                        rmq.forward_messages(&new_cc_range, self_clone.local_key.clone()).await;
+                        rmq.forward_messages(&new_cc_range, self_clone.local_key.clone(), &new_remp_catchain_options).await;
                         log::debug!(target: "validator", "Messages forwarded, rmq: {}, new cc range: {:?}", rmq, new_cc_range);
                     }
                 }

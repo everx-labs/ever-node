@@ -2,12 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.60.8
+
+- Added REMP blocks enumeration (get rid of equal blocks)
+
 ## Version 0.60.7
 
 - Fixed the previous block reference in the block proof after shards merge
 
 ## Version 0.60.6
 
+- SMFT arbitrage
 - Fixed clippy warnings
 
 ## Version 0.60.5
