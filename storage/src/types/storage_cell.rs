@@ -169,7 +169,7 @@ impl StorageCell {
         // References
         for _ in 0..references_count {
             let ref_hash = reader.read_u256()?;
-            new_data.extend_from_slice(&ref_hash.as_slice());
+            new_data.extend_from_slice(ref_hash.as_slice());
             new_data.extend_from_slice(&NOT_INITIALIZED_DEPTH.to_le_bytes());
         }
 
@@ -270,7 +270,7 @@ impl StorageCell {
                 references.push(Reference {
                     hash,
                     depth,
-                    cell: Some(Arc::downgrade(&cell.reference(i)?.cell_impl()))
+                    cell: Some(Arc::downgrade(cell.reference(i)?.cell_impl()))
                 });
             }
         }

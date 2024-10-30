@@ -156,6 +156,12 @@ impl VerificationManager for VerificationManagerImpl {
                             let request_all = true;
                             workchain.start_force_block_delivery(&block_id, request_all);
 
+                            if timeout.as_millis() == 0 {
+                                //special case: in case of mc_max_delivery_wait_timeout = 0 - work in shadow mode and allow blocks with NACKs to be included in MC
+                                log::warn!(target: "verificator", "Block {} with NACK is included in MC due to SMFT shadow mode (mc_max_delivery_wait_timeout=0)", block_id);
+                                return true;
+                            }
+
                             return false;
                         }
                     }
@@ -515,10 +521,10 @@ impl VerificationManagerImpl {
             _metrics_receiver: metrics_receiver.clone(),
             send_new_block_candidate_counter: metrics_receiver.sink().register_counter(&"smft_candidates".into()),
             update_workchains_counter: metrics_receiver.sink().register_counter(&"smft_workchains_updates".into()),
-            blocks_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, &"smft_block".to_string())),
-            workchains_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, &"smft_workchains".to_string())),
-            wc_overlays_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, &"smft_wc_overlays".to_string())),
-            mc_overlays_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, &"smft_mc_overlays".to_string())),
+            blocks_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, "smft_block")),
+            workchains_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, "smft_workchains")),
+            wc_overlays_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, "smft_wc_overlays")),
+            mc_overlays_instance_counter: Arc::new(InstanceCounter::new(&metrics_receiver, "smft_mc_overlays")),
             should_stop_flag: should_stop_flag.clone(),
             dump_thread_is_stopped_flag: dump_thread_is_stopped_flag.clone(),
             config,

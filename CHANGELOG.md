@@ -2,11 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.60.7
+
+- Fixed the previous block reference in the block proof after shards merge
+
 ## Version 0.60.6
 
-- SMFT arbitrage
+- Fixed clippy warnings
 
-## Version 0.60.6
+## Version 0.60.5
 
 - Fixed clippy warnings
 

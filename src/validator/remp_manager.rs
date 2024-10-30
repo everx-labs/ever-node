@@ -54,13 +54,15 @@ pub struct RempInterfaceQueues {
         crossbeam_channel::Receiver<(UInt256, UInt256, Arc<RempMessageOrigin>, RempMessageStatus)>
 }
 
+type DelayHeap = (BinaryHeap<(Reverse<SystemTime>, UInt256)>, HashMap<UInt256, Arc<RempMessageWithOrigin>>);
+
 pub struct RempDelayer {
     max_incoming_broadcast_delay_millis: u32,
     random_seed: u64,
 
     pub incoming_receiver: crossbeam_channel::Receiver<Arc<RempMessageWithOrigin>>,
     pub delayed_incoming_sender: crossbeam_channel::Sender<Arc<RempMessageWithOrigin>>,
-    delay_heap: MutexWrapper<(BinaryHeap<(Reverse<SystemTime>, UInt256)>, HashMap<UInt256, Arc<RempMessageWithOrigin>>)>,
+    delay_heap: MutexWrapper<DelayHeap>,
 }
 
 impl RempDelayer {

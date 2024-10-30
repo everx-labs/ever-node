@@ -674,6 +674,8 @@ impl MessageCacheSession {
     }
 }
 
+pub type MessageWithStatus = (Option<Arc<RmqMessage>>, Arc<RempMessageHeader>, Arc<RempMessageOrigin>, RempMessageStatus, u32);
+
 pub struct MessageCache {
     sessions: Map<u32,Arc<MessageCacheSession>>,
 
@@ -775,7 +777,7 @@ impl MessageCache {
         }
     }
 
-    pub fn get_message_with_origin_status_cc(&self, message_id: &UInt256) -> Result<Option<(Option<Arc<RmqMessage>>, Arc<RempMessageHeader>, Arc<RempMessageOrigin>, RempMessageStatus, u32)>> {
+    pub fn get_message_with_origin_status_cc(&self, message_id: &UInt256) -> Result<Option<MessageWithStatus>> {
         let session = match self.get_session_for_message(message_id) {
             None => return Ok(None),
             Some(s) => s

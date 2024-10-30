@@ -299,7 +299,7 @@ impl BoolVectorImpl {
 
         Self {
             pool: SessionPool::Temp,
-            hash: hash,
+            hash,
             data: buffer,
             len: data.len(),
             instance_counter: instance_counter.clone_as_temp(),
@@ -315,9 +315,9 @@ impl BoolVectorImpl {
 
         Self {
             pool: SessionPool::Temp,
-            hash: hash,
+            hash,
             data: buffer,
-            len: len,
+            len,
             instance_counter: instance_counter.clone_as_temp(),
         }
     }

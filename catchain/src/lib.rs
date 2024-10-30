@@ -10,6 +10,7 @@
 * See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
+#![allow(clippy::too_many_arguments)]
 
 /// Modules
 mod activity_node;
@@ -518,9 +519,9 @@ pub trait Receiver {
     fn create_block(&mut self, block: &ton::BlockDep) -> ReceivedBlockPtr;
 
     /// Create new block from a string dump
-    fn create_block_from_string_dump(&self, dump: &String) -> ReceivedBlockPtr;
+    fn create_block_from_string_dump(&self, dump: &str) -> ReceivedBlockPtr;
 
-    fn parse_add_received_block(&mut self, s: &String);
+    fn parse_add_received_block(&mut self, s: &str);
 
     /// Adding new block
     fn add_block(&mut self, payload: BlockPayloadPtr, deps: Vec<BlockHash>);
@@ -826,10 +827,12 @@ pub trait ReceiverListener {
     fn get_task_queue(&self) -> &ReceiverTaskQueuePtr;
 }
 
+pub type PostCallback = Box<dyn FnOnce(&mut dyn Receiver) + Send>;
+
 /// Tasks queue for receiver
 pub trait ReceiverTaskQueue: Send + Sync {
     /// Task execution
-    fn post_closure(&self, handler: Box<dyn FnOnce(&mut dyn Receiver) + Send>);
+    fn post_closure(&self, handler: PostCallback);
 
     /// Utility task execution
     fn post_utility_closure(&self, handler: Box<dyn FnOnce() + Send>);
@@ -959,7 +962,7 @@ impl CatchainFactory {
 
     /// Create new received block from string dump
     pub fn create_received_block_from_string_dump(
-        dump: &String,
+        dump: &str,
         receiver: &dyn Receiver,
     ) -> ReceivedBlockPtr {
         received_block::ReceivedBlockImpl::create_from_string_dump(dump, receiver)

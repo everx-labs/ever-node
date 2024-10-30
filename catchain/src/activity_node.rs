@@ -94,7 +94,7 @@ impl ActivityNodeImpl {
         let body = Self {
             manager: Arc::downgrade(&manager_wrapper),
             id: manager.generate_id(),
-            name: name,
+            name,
             creation_time: SystemTime::now(),
             access_time: Arc::new(AtomicU64::new(0)),
         };
@@ -259,7 +259,7 @@ impl ActivityNodeManager {
 
     /// Dump active nodes
     fn dump(nodes: HashMap<NodeId, Weak<dyn ActivityNode>>) {
-        if nodes.len() == 0 {
+        if nodes.is_empty() {
             log::info!("No Catchain activity nodes have been found");
             return;
         }

@@ -112,6 +112,6 @@ impl Ord for PackageId {
 
 impl PartialOrd for PackageId {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.id().partial_cmp(&other.id())
+        Some(self.id().cmp(&other.id()))
     }
 }

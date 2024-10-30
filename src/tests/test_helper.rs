@@ -716,7 +716,6 @@ impl TestEngine {
             Some(extra.rand_seed().clone()),
             None,
             CollatorSettings::default(),
-            None
         )?;
 
         let (block_candidate, new_state) = collator.collate().await?;

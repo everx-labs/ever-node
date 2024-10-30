@@ -700,8 +700,7 @@ impl RempClient {
         address: AccountId,
         now: u32,
     ) -> Result<(HashMap<Arc<KeyId>, ValidatorInfo>, u32)> {
-        let last_mc_state_extra = last_mc_state.state()?.read_custom()?
-            .ok_or_else(|| error!("State for {} doesn't have McStateExtra", last_mc_state.block_id()))?;
+        let last_mc_state_extra = last_mc_state.shard_state_extra()?;
         let cc_config = last_mc_state_extra.config.catchain_config()?;
         let cur_validator_set = last_mc_state_extra.config.validator_set()?;
         let next_validator_set = last_mc_state_extra.config.next_validator_set()?;

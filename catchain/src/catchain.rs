@@ -10,6 +10,7 @@
 * See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
+#![allow(clippy::too_many_arguments)]
 
 use crate::{
     check_execution_time, instrument, ActivityNodePtr, Block, BlockExtraId, BlockHash, 
@@ -184,9 +185,11 @@ struct TaskDesc<F: ?Sized> {
     creation_time: std::time::SystemTime, //time of task creation
 }
 
+type TaskCatchainProcesseor = Box<TaskDesc<dyn FnOnce(&mut CatchainProcessor) + Send>>;
+
 pub(crate) struct CatchainImpl {
     main_queue_sender:
-        crossbeam::channel::Sender<Box<TaskDesc<dyn FnOnce(&mut CatchainProcessor) + Send>>>, //queue from outer world to the Catchain main thread
+        crossbeam::channel::Sender<TaskCatchainProcesseor>, //queue from outer world to the Catchain main thread
     utility_queue_sender: crossbeam::channel::Sender<Box<TaskDesc<dyn FnOnce() + Send>>>, //queue from outer world to the Catchain utility thread
     should_stop_flag: Arc<AtomicBool>, //atomic flag to indicate that Catchain thread should be stopped
     main_thread_is_stopped_flag: Arc<AtomicBool>, //atomic flag to indicate that Catchain thread has been stopped
@@ -311,7 +314,7 @@ impl CatchainOverlayListener for OverlayListenerImpl {
 
                         utils::serialize_query_boxed_response(Ok(
                             ::ton_api::ton::catchain::difference::Difference {
-                                sent_upto: message.rt.clone().into(),
+                                sent_upto: message.rt.clone(),
                             }
                             .into_boxed(),
                         ))
@@ -372,7 +375,7 @@ impl ReceiverTaskQueue for ReceiverTaskQueueImpl {
         }
     }
 
-    fn post_closure(&self, handler: Box<dyn FnOnce(&mut dyn Receiver) + Send>) {
+    fn post_closure(&self, handler: crate::PostCallback) {
         if let Some(catchain) = self.catchain.upgrade() {
             catchain.post_closure(move |processor: &mut CatchainProcessor| {
                 handler(&mut *processor.receiver.borrow_mut());
@@ -383,7 +386,7 @@ impl ReceiverTaskQueue for ReceiverTaskQueueImpl {
 
 impl ReceiverTaskQueueImpl {
     fn create(catchain: CatchainImplWeakPtr) -> ReceiverTaskQueuePtr {
-        Arc::new(Self { catchain: catchain })
+        Arc::new(Self { catchain })
     }
 }
 
@@ -401,13 +404,15 @@ trait CompletionHandler: std::any::Any {
     fn reset_with_error(&mut self, error: Error, receiver: &mut dyn Receiver);
 }
 
+pub type ResponceCallback<T> = Box<dyn FnOnce(Result<T>, &mut dyn Receiver)>;
+
 struct SingleThreadedCompletionHandler<T> {
-    handler: Option<Box<dyn FnOnce(Result<T>, &mut dyn Receiver)>>,
+    handler: Option<ResponceCallback<T>>,
     creation_time: std::time::SystemTime, //time of handler creation
 }
 
 impl<T> SingleThreadedCompletionHandler<T> {
-    fn new(handler: Box<dyn FnOnce(Result<T>, &mut dyn Receiver)>) -> Self {
+    fn new(handler: ResponceCallback<T>) -> Self {
         Self {
             handler: Some(handler),
             creation_time: SystemTime::now(),
@@ -710,7 +715,7 @@ impl ReceiverListenerImpl {
 
     fn store_completion_handler<T>(
         &mut self,
-        response_callback: Box<dyn FnOnce(Result<T>, &mut dyn Receiver)>,
+        response_callback: ResponceCallback<T>,
     ) -> CompletionHandlerId
     where
         T: 'static,
@@ -732,7 +737,7 @@ impl ReceiverListenerImpl {
 
     fn create_completion_handler<T>(
         &mut self,
-        response_callback: Box<dyn FnOnce(Result<T>, &mut dyn Receiver)>,
+        response_callback: ResponceCallback<T>,
     ) -> Box<dyn FnOnce(Result<T>) + Send>
     where
         T: 'static + Send,
@@ -777,13 +782,13 @@ impl ReceiverListenerImpl {
         for (handler_id, handler) in completion_handlers.iter() {
             if let Ok(latency) = handler.get_creation_time().elapsed() {
                 if latency > COMPLETION_HANDLERS_MAX_WAIT_PERIOD {
-                    expired_handlers.push((handler_id.clone(), latency));
+                    expired_handlers.push((*handler_id, latency));
                 }
             }
         }
 
         for (handler_id, latency) in expired_handlers.iter_mut() {
-            let handler = completion_handlers.remove(&handler_id);
+            let handler = completion_handlers.remove(handler_id);
 
             if let Some(mut handler) = handler {
                 let warning = error!(
@@ -809,7 +814,7 @@ impl ReceiverListenerImpl {
         let body = ReceiverListenerImpl {
             task_queue: ReceiverTaskQueueImpl::create(catchain_weak.clone()),
             catchain: catchain_weak,
-            overlay: overlay,
+            overlay,
             next_completion_handler_available_index: 1,
             completion_handlers: HashMap::new(),
             in_bytes: catchain.in_bytes.clone(),
@@ -945,9 +950,7 @@ impl CatchainProcessor {
 
     pub(self) fn main_loop(
         catchain: CatchainImplPtr,
-        queue_receiver: crossbeam::channel::Receiver<
-            Box<TaskDesc<dyn FnOnce(&mut CatchainProcessor) + Send>>,
-        >,
+        queue_receiver: crossbeam::channel::Receiver<TaskCatchainProcesseor>,
         should_stop_flag: Arc<AtomicBool>,
         is_stopped_flag: Arc<AtomicBool>,
         utility_thread_is_stopped_flag: Arc<AtomicBool>,
@@ -1016,127 +1019,127 @@ impl CatchainProcessor {
         let mut metrics_dumper = MetricsDumper::new();
 
         metrics_dumper.add_compute_handler(
-            "received_blocks".to_string(),
-            &utils::compute_instance_counter,
+            "received_blocks",
+            utils::compute_instance_counter,
         );
-        metrics_dumper.add_derivative_metric("received_blocks".to_string());
-        metrics_dumper.add_derivative_metric("receiver_out_messages".to_string());
-        metrics_dumper.add_derivative_metric("receiver_in_messages".to_string());
-        metrics_dumper.add_derivative_metric("receiver_out_queries.total".to_string());
-        metrics_dumper.add_derivative_metric("receiver_in_queries.total".to_string());
-        metrics_dumper.add_derivative_metric("receiver_in_broadcasts".to_string());
-        metrics_dumper.add_derivative_metric("db_get_txs".to_string());
-        metrics_dumper.add_derivative_metric("db_put_txs".to_string());
-        metrics_dumper.add_derivative_metric("catchain_main_loop_iterations".to_string());
-        metrics_dumper.add_derivative_metric("catchain_main_loop_overloads".to_string());
-        metrics_dumper.add_derivative_metric("catchain_utility_loop_iterations".to_string());
-        metrics_dumper.add_derivative_metric("catchain_utility_loop_overloads".to_string());
+        metrics_dumper.add_derivative_metric("received_blocks");
+        metrics_dumper.add_derivative_metric("receiver_out_messages");
+        metrics_dumper.add_derivative_metric("receiver_in_messages");
+        metrics_dumper.add_derivative_metric("receiver_out_queries.total");
+        metrics_dumper.add_derivative_metric("receiver_in_queries.total");
+        metrics_dumper.add_derivative_metric("receiver_in_broadcasts");
+        metrics_dumper.add_derivative_metric("db_get_txs");
+        metrics_dumper.add_derivative_metric("db_put_txs");
+        metrics_dumper.add_derivative_metric("catchain_main_loop_iterations");
+        metrics_dumper.add_derivative_metric("catchain_main_loop_overloads");
+        metrics_dumper.add_derivative_metric("catchain_utility_loop_iterations");
+        metrics_dumper.add_derivative_metric("catchain_utility_loop_overloads");
 
-        metrics_dumper.add_derivative_metric("process_blocks_requests".to_string());
-        metrics_dumper.add_derivative_metric("process_blocks_responses".to_string());
-        metrics_dumper.add_derivative_metric("process_blocks_skip_responses".to_string());
-        metrics_dumper.add_derivative_metric("process_blocks_batching_requests".to_string());
+        metrics_dumper.add_derivative_metric("process_blocks_requests");
+        metrics_dumper.add_derivative_metric("process_blocks_responses");
+        metrics_dumper.add_derivative_metric("process_blocks_skip_responses");
+        metrics_dumper.add_derivative_metric("process_blocks_batching_requests");
 
-        metrics_dumper.add_derivative_metric("overlay_in_bytes".to_string());
-        metrics_dumper.add_derivative_metric("overlay_out_bytes".to_string());
-        metrics_dumper.add_derivative_metric("overlay_in_messages_bytes".to_string());
-        metrics_dumper.add_derivative_metric("overlay_out_messages_bytes".to_string());
-        metrics_dumper.add_derivative_metric("overlay_in_queries_bytes".to_string());
-        metrics_dumper.add_derivative_metric("overlay_out_queries_bytes".to_string());
-        metrics_dumper.add_derivative_metric("overlay_in_broadcasts_bytes".to_string());
-        metrics_dumper.add_derivative_metric("overlay_out_broadcasts_bytes".to_string());
+        metrics_dumper.add_derivative_metric("overlay_in_bytes");
+        metrics_dumper.add_derivative_metric("overlay_out_bytes");
+        metrics_dumper.add_derivative_metric("overlay_in_messages_bytes");
+        metrics_dumper.add_derivative_metric("overlay_out_messages_bytes");
+        metrics_dumper.add_derivative_metric("overlay_in_queries_bytes");
+        metrics_dumper.add_derivative_metric("overlay_out_queries_bytes");
+        metrics_dumper.add_derivative_metric("overlay_in_broadcasts_bytes");
+        metrics_dumper.add_derivative_metric("overlay_out_broadcasts_bytes");
 
         utils::add_compute_relative_metric(
             &mut metrics_dumper,
-            &"overlay_in_messages.avg_size".to_string(),
-            &"overlay_in_messages_bytes".to_string(),
-            &"receiver_in_messages".to_string(),
+            "overlay_in_messages.avg_size",
+            "overlay_in_messages_bytes",
+            "receiver_in_messages",
             0.0,
         );
         utils::add_compute_relative_metric(
             &mut metrics_dumper,
-            &"overlay_out_messages.avg_size".to_string(),
-            &"overlay_out_messages_bytes".to_string(),
-            &"receiver_out_messages".to_string(),
+            "overlay_out_messages.avg_size",
+            "overlay_out_messages_bytes",
+            "receiver_out_messages",
             0.0,
         );
         utils::add_compute_relative_metric(
             &mut metrics_dumper,
-            &"overlay_in_queries.avg_size".to_string(),
-            &"overlay_in_queries_bytes".to_string(),
-            &"receiver_in_queries.total".to_string(),
+            "overlay_in_queries.avg_size",
+            "overlay_in_queries_bytes",
+            "receiver_in_queries.total",
             0.0,
         );
         utils::add_compute_relative_metric(
             &mut metrics_dumper,
-            &"overlay_out_queries.avg_size".to_string(),
-            &"overlay_out_queries_bytes".to_string(),
-            &"receiver_out_queries.total".to_string(),
+            "overlay_out_queries.avg_size",
+            "overlay_out_queries_bytes",
+            "receiver_out_queries.total",
             0.0,
         );
         utils::add_compute_relative_metric(
             &mut metrics_dumper,
-            &"overlay_in_broadcasts.avg_size".to_string(),
-            &"overlay_in_broadcasts_bytes".to_string(),
-            &"receiver_in_broadcasts".to_string(),
-            0.0,
-        );
-
-        utils::add_compute_percentage_metric(
-            &mut metrics_dumper,
-            &"process_blocks_skipping".to_string(),
-            &"process_blocks_skip_responses".to_string(),
-            &"process_blocks_responses".to_string(),
-            0.0,
-        );
-        utils::add_compute_percentage_metric(
-            &mut metrics_dumper,
-            &"process_blocks_batching".to_string(),
-            &"process_blocks_batching_requests".to_string(),
-            &"process_blocks_responses".to_string(),
+            "overlay_in_broadcasts.avg_size",
+            "overlay_in_broadcasts_bytes",
+            "receiver_in_broadcasts",
             0.0,
         );
 
         utils::add_compute_percentage_metric(
             &mut metrics_dumper,
-            &"catchain_main_loop_load".to_string(),
-            &"catchain_main_loop_overloads".to_string(),
-            &"catchain_main_loop_iterations".to_string(),
+            "process_blocks_skipping",
+            "process_blocks_skip_responses",
+            "process_blocks_responses",
             0.0,
         );
         utils::add_compute_percentage_metric(
             &mut metrics_dumper,
-            &"catchain_utility_loop_load".to_string(),
-            &"catchain_utility_loop_overloads".to_string(),
-            &"catchain_utility_loop_iterations".to_string(),
+            "process_blocks_batching",
+            "process_blocks_batching_requests",
+            "process_blocks_responses",
             0.0,
         );
-        utils::add_compute_result_metric(&mut metrics_dumper, &"receiver_out_queries".to_string());
-        utils::add_compute_result_metric(&mut metrics_dumper, &"receiver_in_queries".to_string());
+
         utils::add_compute_percentage_metric(
             &mut metrics_dumper,
-            &"received_blocks_in_duplication".to_string(),
-            &"receiver_in_messages".to_string(),
-            &"received_blocks.create".to_string(),
+            "catchain_main_loop_load",
+            "catchain_main_loop_overloads",
+            "catchain_main_loop_iterations",
+            0.0,
+        );
+        utils::add_compute_percentage_metric(
+            &mut metrics_dumper,
+            "catchain_utility_loop_load",
+            "catchain_utility_loop_overloads",
+            "catchain_utility_loop_iterations",
+            0.0,
+        );
+        utils::add_compute_result_metric(&mut metrics_dumper, "receiver_out_queries");
+        utils::add_compute_result_metric(&mut metrics_dumper, "receiver_in_queries");
+        utils::add_compute_percentage_metric(
+            &mut metrics_dumper,
+            "received_blocks_in_duplication",
+            "receiver_in_messages",
+            "received_blocks.create",
             -1.0,
         );
         utils::add_compute_percentage_metric(
             &mut metrics_dumper,
-            &"received_blocks_out_duplication".to_string(),
-            &"receiver_out_messages".to_string(),
-            &"received_blocks.create".to_string(),
+            "received_blocks_out_duplication",
+            "receiver_out_messages",
+            "received_blocks.create",
             -1.0,
         );
 
-        metrics_dumper.add_derivative_metric("main_queue.posts".to_string());
-        metrics_dumper.add_derivative_metric("main_queue.pulls".to_string());
-        metrics_dumper.add_derivative_metric("utility_queue.posts".to_string());
-        metrics_dumper.add_derivative_metric("utility_queue.pulls".to_string());
+        metrics_dumper.add_derivative_metric("main_queue.posts");
+        metrics_dumper.add_derivative_metric("main_queue.pulls");
+        metrics_dumper.add_derivative_metric("utility_queue.posts");
+        metrics_dumper.add_derivative_metric("utility_queue.pulls");
         metrics_dumper
-            .add_compute_handler("main_queue".to_string(), &utils::compute_queue_size_counter);
+            .add_compute_handler("main_queue", utils::compute_queue_size_counter);
         metrics_dumper.add_compute_handler(
-            "utility_queue".to_string(),
-            &utils::compute_queue_size_counter,
+            "utility_queue",
+            utils::compute_queue_size_counter,
         );
 
         //start main loop
@@ -1183,15 +1186,11 @@ impl CatchainProcessor {
                 processor.set_next_awake_time(next_metrics_dump_time);
                 processor.set_next_awake_time(next_profiling_dump_time);
 
-                let timeout = match processor
+                let timeout = processor
                     .receiver
                     .borrow()
                     .get_next_awake_time()
-                    .duration_since(SystemTime::now())
-                {
-                    Ok(timeout) => timeout,
-                    Err(_err) => Duration::default(),
-                };
+                    .duration_since(SystemTime::now()).unwrap_or_default();
 
                 let task_desc = {
                     instrument!();
@@ -1247,16 +1246,14 @@ impl CatchainProcessor {
                             last_awake + CATCHAIN_INFINITE_SEND_PROCESS_TIMEOUT,
                         );
                         processor.send_process_attempt();
-                    } else {
-                        if let Ok(delay) = processor
-                            .next_block_generation_time
-                            .duration_since(SystemTime::now())
-                        {
-                            log::trace!(
-                                "Waiting for {:.3}s for a new block generation time slot",
-                                delay.as_secs_f64()
-                            );
-                        }
+                    } else if let Ok(delay) = processor
+                        .next_block_generation_time
+                        .duration_since(SystemTime::now())
+                    {
+                        log::trace!(
+                            "Waiting for {:.3}s for a new block generation time slot",
+                            delay.as_secs_f64()
+                        );
                     }
                 }
 
@@ -1606,19 +1603,8 @@ impl CatchainProcessor {
         instrument!();
 
         let random_value = self.rng.gen_range(0..self.top_blocks.len());
-        let mut index = 0;
-        let mut found_hash: Option<BlockHash> = None;
-
-        for (hash, _) in self.top_blocks.iter() {
-            if index >= random_value {
-                found_hash = Some(hash.clone());
-                break;
-            }
-
-            index += 1;
-        }
-
-        return self.top_blocks.remove(&found_hash.unwrap()).unwrap();
+        let hash = self.top_blocks.keys().nth(random_value).unwrap().clone();
+        self.top_blocks.remove(&hash).unwrap()
     }
 
     fn set_processed(&mut self, block: BlockPtr) {
@@ -1643,7 +1629,7 @@ impl CatchainProcessor {
 
         log::trace!("...{} top blocks found", self.top_blocks.len());
 
-        while self.top_blocks.len() > 0 && blocks.len() < self.options.max_deps as usize {
+        while !self.top_blocks.is_empty() && blocks.len() < self.options.max_deps as usize {
             let block = self.remove_random_top_block();
             let source_id = block.get_source_id();
 
@@ -1763,12 +1749,10 @@ impl CatchainProcessor {
 
         let batching_mode = if self.force_process {
             false //do not batch in case if validator session requested to generate block immediately (collator's flow); default flow, same with T-Node
+        } else if self.top_blocks.is_empty() {
+            true //batch if we don't have unprocessed (not merged) top blocks from other validators (default flow; same with T-Node)
         } else {
-            if self.top_blocks.len() == 0 {
-                true //batch if we don't have unprocessed (not merged) top blocks from other validators (default flow; same with T-Node)
-            } else {
-                enable_batching_mode //batch if it is requested by a validator session
-            }
+            enable_batching_mode //batch if it is requested by a validator session
         };
 
         log::debug!(
@@ -1796,7 +1780,7 @@ impl CatchainProcessor {
 
             log::debug!("...catchain finish processing");
 
-            if self.top_blocks.len() == 0 {
+            if self.top_blocks.is_empty() {
                 self.notify_finished_processing();
             }
 
@@ -1957,7 +1941,7 @@ impl CatchainProcessor {
             height
         );
 
-        if self.top_blocks.len() == 0 && !self.active_process && self.receiver_started {
+        if self.top_blocks.is_empty() && !self.active_process && self.receiver_started {
             self.set_next_block_generation_time(SystemTime::now() + self.options.idle_timeout);
         }
 
@@ -1978,9 +1962,7 @@ impl CatchainProcessor {
 
         //initialize new block dependencies and update top blocks (if dependency is on top)
 
-        let mut block_deps: Vec<BlockPtr> = Vec::new();
-
-        block_deps.reserve(deps.len());
+        let mut block_deps: Vec<BlockPtr> = Vec::with_capacity(deps.len());
 
         for dep in &deps {
             if !self.blamed_sources[source_id] && self.top_blocks.contains_key(dep) {
@@ -1989,7 +1971,7 @@ impl CatchainProcessor {
 
             let block_dep = self.get_block(dep.clone());
 
-            assert!(!block_dep.is_none());
+            assert!(block_dep.is_some());
 
             block_deps.push(block_dep.unwrap());
         }
@@ -2039,7 +2021,7 @@ impl CatchainProcessor {
                 );
             }
 
-            if self.top_blocks.len() == 0 && !self.active_process && self.receiver_started {
+            if self.top_blocks.is_empty() && !self.active_process && self.receiver_started {
                 self.set_next_block_generation_time(SystemTime::now() + self.options.idle_timeout);
             }
         }
@@ -2260,8 +2242,8 @@ impl CatchainProcessor {
             .map(|key| utils::public_key_hash_to_int256(&key))
             .collect();
         let first_block = ::ton_api::ton::catchain::firstblock::Firstblock {
-            unique_hash: session_id.clone().into(),
-            nodes: sources_as_int256.into(),
+            unique_hash: session_id.clone(),
+            nodes: sources_as_int256,
         }
         .into_boxed();
         let overlay_id = utils::get_overlay_id(&first_block)?;
@@ -2319,37 +2301,37 @@ impl CatchainProcessor {
         //catchain processor creation
 
         let body = Self {
-            session_id: session_id,
+            session_id,
             next_block_generation_time: SystemTime::now(),
-            options: options,
+            options,
             _overlay_listener: overlay_listener,
-            receiver_listener: receiver_listener,
-            receiver: receiver,
+            receiver_listener,
+            receiver,
             catchain_listener: listener,
             blocks_storage: BlocksStorage::new(),
             blocks: HashMap::new(),
             block_descs: HashMap::new(),
             top_blocks: HashMap::new(),
             top_source_blocks: vec![None; ids.len()],
-            sources: sources,
+            sources,
             blamed_sources: vec![false; ids.len()],
             process_deps: Vec::new(),
             processing_blocks_stack: Vec::with_capacity(BLOCKS_PROCESSING_STACK_CAPACITY),
             processing_blocks_stack_tmp: Vec::with_capacity(BLOCKS_PROCESSING_STACK_CAPACITY),
             _ids: ids,
-            local_id: local_id,
-            local_idx: local_idx,
+            local_id,
+            local_idx,
             _overlay_id: overlay_id,
             overlay_short_id: overlay_short_id.clone(),
-            overlay: overlay,
-            overlay_manager: overlay_manager,
+            overlay,
+            overlay_manager,
             force_process: false,
             active_process: false,
             rng: rand::thread_rng(),
             current_extra_id: 0,
             receiver_started: false,
             current_time: None,
-            utility_queue_sender: utility_queue_sender,
+            utility_queue_sender,
             process_blocks_requests_counter,
             process_blocks_responses_counter,
             process_blocks_skip_responses_counter,
@@ -2645,14 +2627,8 @@ impl CatchainImpl {
     ) -> CatchainPtr {
         log::debug!("Creating Catchain...");
 
-        let (main_queue_sender, main_queue_receiver): (
-            crossbeam::channel::Sender<Box<TaskDesc<dyn FnOnce(&mut CatchainProcessor) + Send>>>,
-            crossbeam::channel::Receiver<Box<TaskDesc<dyn FnOnce(&mut CatchainProcessor) + Send>>>,
-        ) = crossbeam::channel::unbounded();
-        let (utility_queue_sender, utility_queue_receiver): (
-            crossbeam::channel::Sender<Box<TaskDesc<dyn FnOnce() + Send>>>,
-            crossbeam::channel::Receiver<Box<TaskDesc<dyn FnOnce() + Send>>>,
-        ) = crossbeam::channel::unbounded();
+        let (main_queue_sender, main_queue_receiver) = crossbeam::channel::unbounded();
+        let (utility_queue_sender, utility_queue_receiver) = crossbeam::channel::unbounded();
         let utility_queue_sender_clone = utility_queue_sender.clone();
         let should_stop_flag = Arc::new(AtomicBool::new(false));
         let destroy_db_flag = Arc::new(AtomicBool::new(false));

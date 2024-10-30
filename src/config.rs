@@ -863,7 +863,7 @@ impl TonNodeConfig {
         Ok(false)
     }
 
-    fn remove_key_from_key_ring(&mut self, validator_key_id: &String) {
+    fn remove_key_from_key_ring(&mut self, validator_key_id: &str) {
         if let Some(key_ring) = self.validator_key_ring.as_mut() {
             key_ring.remove(validator_key_id);
         }

@@ -1494,7 +1494,7 @@ impl SessionFactory {
     pub fn create_session(
         options: &SessionOptions,
         session_id: &SessionId,
-        ids: &Vec<SessionNode>,
+        ids: Vec<SessionNode>,
         local_key: &PrivateKey,
         db_path: String,
         db_suffix: String,

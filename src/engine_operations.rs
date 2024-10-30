@@ -1411,8 +1411,6 @@ async fn redirect_external_message(
         ).await;
         #[cfg(feature = "telemetry")]
         engine.full_node_telemetry().sent_ext_msg_broadcast();
-        #[cfg(feature = "tracing")]
-        crate::jaeger::broadcast_sended(id.to_hex_string());
         res
     } else {
         fail!("External message is not properly formatted: {}", message)

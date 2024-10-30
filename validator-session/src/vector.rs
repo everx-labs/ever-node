@@ -26,24 +26,22 @@ use std::fmt;
 ===================================================================================================
 */
 
-fn compute_hash<T>(data: &Vec<T>) -> HashType
+fn compute_hash<T>(data: &[T]) -> HashType
 where
     T: HashableObject,
 {
     let hashes: Vec<ton::int> = data.iter().map(|x| x.get_ton_hash()).collect();
 
     crate::utils::compute_hash(ton::hashable::Vector {
-        value: hashes.into(),
+        value: hashes,
     })
 }
 
-fn compute_vector_hash<T>(data: &Vec<T>) -> HashType
+fn compute_vector_hash<T>(data: &[T]) -> HashType
 where
     T: HashableObject + 'static,
 {
-    let obj: &dyn std::any::Any = data;
-
-    if let Some(ref _data) = obj.downcast_ref::<Vec<bool>>() {
+    if std::any::TypeId::of::<T>() == std::any::TypeId::of::<bool>() {
         unreachable!();
     } else {
         crate::utils::compute_hash(ton::hashable::CntVector {
@@ -52,7 +50,7 @@ where
     }
 }
 
-fn compute_sorted_vector_hash<T>(data: &Vec<T>) -> HashType
+fn compute_sorted_vector_hash<T>(data: &[T]) -> HashType
 where
     T: HashableObject,
 {
@@ -61,7 +59,7 @@ where
     })
 }
 
-fn compare<T>(left: &Vec<T>, right: &Vec<T>) -> bool
+fn compare<T>(left: &[T], right: &[T]) -> bool
 where
     T: std::cmp::PartialEq,
 {
@@ -69,7 +67,7 @@ where
         return false;
     }
 
-    for i in 0..left.len() as usize {
+    for i in 0..left.len() {
         if left[i] != right[i] {
             return false;
         }
@@ -254,7 +252,7 @@ where
     fn iter(&self) -> std::slice::Iter<T> {
         match &self {
             Some(ref src) => src.iter(),
-            _ => (&[]).iter(),
+            _ => [].iter(),
         }
     }
 
@@ -545,7 +543,7 @@ where
         desc: &mut dyn SessionDescription,
         data: Vec<T>,
     ) -> Option<PoolPtr<dyn Vector<T>>> {
-        if data.len() == 0 {
+        if data.is_empty() {
             return None;
         }
 
@@ -679,7 +677,7 @@ where
     fn iter(&self) -> std::slice::Iter<T> {
         match &self {
             Some(ref src) => src.iter(),
-            _ => (&[]).iter(),
+            _ => [].iter(),
         }
     }
 
@@ -705,9 +703,9 @@ where
                     let middle = (right + left) as usize / 2;
                     let middle_value = &data[middle];
 
-                    if Compare::less(&middle_value, &value) {
+                    if Compare::less(middle_value, &value) {
                         left = middle as i32;
-                    } else if Compare::less(&value, &middle_value) {
+                    } else if Compare::less(&value, middle_value) {
                         right = middle as i32;
                     } else {
                         if middle_value == &value {

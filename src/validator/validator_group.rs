@@ -186,7 +186,7 @@ impl ValidatorGroupImpl {
             SessionFactory::create_session(
                 &g.config,
                 &g.session_id,
-                &nodes,
+                nodes,
                 &g.local_key,
                 db_path,
                 db_suffix,

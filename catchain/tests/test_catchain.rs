@@ -59,12 +59,6 @@ impl CatchainListener for DummyCatchainListener {
     fn set_time(&self, _timestamp: std::time::SystemTime) {}
 }
 
-impl DummyCatchainListener {
-    fn new() -> Arc<dyn CatchainListener + Send + Sync> {
-        Arc::new(Self)
-    }
-}
-
 #[tokio::test]
 async fn test_catchain_creation() {
   
@@ -103,23 +97,20 @@ async fn test_catchain_creation() {
 
     let mut source_ids: Vec<CatchainNode> = Vec::new();
 
-    for (_i, src) in sources.lines().enumerate() {
-        match src.split(": ").nth(1) {
-            Some(hex) => {
-                let public_key = parse_hex_as_public_key_raw(hex);
-                let adnl_id = get_public_key_hash(&public_key);
+    for src in sources.lines() {
+        if let Some(hex) = src.split(": ").nth(1) {
+            let public_key = parse_hex_as_public_key_raw(hex);
+            let adnl_id = get_public_key_hash(&public_key);
 
-                source_ids.push(CatchainNode {
-                    public_key: public_key,
-                    adnl_id: adnl_id,
-                });
-            }
-            None => (),
+            source_ids.push(CatchainNode {
+                public_key,
+                adnl_id,
+            });
         }
     }
     let local_key = source_ids[0].public_key.clone();
 
-    let catchain_listener = DummyCatchainListener::new();
+    let catchain_listener  = Arc::new(DummyCatchainListener) as Arc<dyn CatchainListener + Send + Sync>;
     let options = Options::default();
     let session_id = SessionId::default();
     let db_suffix = String::new();
@@ -136,7 +127,7 @@ async fn test_catchain_creation() {
         Arc::downgrade(&catchain_listener),
     );
 
-    print!("Finished! Now exiting...\n");
+    println!("Finished! Now exiting...");
     catchain.stop(true);
     destroy_rocks_db(DB_PATH, DB_NAME).await.unwrap()
  

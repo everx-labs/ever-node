@@ -459,24 +459,24 @@ impl Workchain {
         add_compute_relative_metric(
             metrics_dumper,
             &format!("smft_wc{}_merges_per_block", workchain_id),
-            &format!("smft_wc{}_block_status_merges", workchain_id),
-            &format!("smft_wc{}_new_block_candidates", workchain_id),
+            format!("smft_wc{}_block_status_merges", workchain_id),
+            format!("smft_wc{}_new_block_candidates", workchain_id),
             0.0,
         );
 
         add_compute_relative_metric(
             metrics_dumper,
             &format!("smft_wc{}_updates_per_mc_send", workchain_id),
-            &format!("smft_wc{}_block_status_processings", workchain_id),
-            &format!("smft_wc{}_block_status_to_mc_sends", workchain_id),
+            format!("smft_wc{}_block_status_processings", workchain_id),
+            format!("smft_wc{}_block_status_to_mc_sends", workchain_id),
             0.0,
         );
 
         add_compute_relative_metric(
             metrics_dumper,
             &format!("smft_wc{}_mc_sends_per_block_candidate", workchain_id),
-            &format!("smft_wc{}_block_status_to_mc_sends", workchain_id),
-            &format!("smft_wc{}_new_block_candidates", workchain_id),
+            format!("smft_wc{}_block_status_to_mc_sends", workchain_id),
+            format!("smft_wc{}_new_block_candidates", workchain_id),
             0.0,
         );
 
@@ -533,48 +533,48 @@ impl Workchain {
         add_compute_relative_metric(
             metrics_dumper,
             &format!("smft_wc{}_wc_overlay_in_broadcast_avg_size", workchain_id),
-            &format!("smft_wc{}_wc_overlay_in_broadcasts_size", workchain_id),
-            &format!("smft_wc{}_wc_overlay_in_broadcasts", workchain_id),
+            format!("smft_wc{}_wc_overlay_in_broadcasts_size", workchain_id),
+            format!("smft_wc{}_wc_overlay_in_broadcasts", workchain_id),
             0.0,
         );
 
         add_compute_relative_metric(
             metrics_dumper,
             &format!("smft_wc{}_wc_overlay_out_broadcast_avg_size", workchain_id),
-            &format!("smft_wc{}_wc_overlay_out_broadcasts_size", workchain_id),
-            &format!("smft_wc{}_wc_overlay_out_broadcasts", workchain_id),
+            format!("smft_wc{}_wc_overlay_out_broadcasts_size", workchain_id),
+            format!("smft_wc{}_wc_overlay_out_broadcasts", workchain_id),
             0.0,
         );
 
         add_compute_relative_metric(
             metrics_dumper,
             &format!("smft_wc{}_wc_overlay_in_query_avg_size", workchain_id),
-            &format!("smft_wc{}_wc_overlay_in_queries_size", workchain_id),
-            &format!("smft_wc{}_wc_overlay_in_queries", workchain_id),
+            format!("smft_wc{}_wc_overlay_in_queries_size", workchain_id),
+            format!("smft_wc{}_wc_overlay_in_queries", workchain_id),
             0.0,
         );
 
         add_compute_relative_metric(
             metrics_dumper,
             &format!("smft_wc{}_wc_overlay_out_query_avg_size", workchain_id),
-            &format!("smft_wc{}_wc_overlay_out_queries_size", workchain_id),
-            &format!("smft_wc{}_wc_overlay_out_queries.total", workchain_id),
+            format!("smft_wc{}_wc_overlay_out_queries_size", workchain_id),
+            format!("smft_wc{}_wc_overlay_out_queries.total", workchain_id),
             0.0,
         );
 
         add_compute_relative_metric(
             metrics_dumper,
             &format!("smft_wc{}_wc_overlay_in_message_avg_size", workchain_id),
-            &format!("smft_wc{}_wc_overlay_in_messages_size", workchain_id),
-            &format!("smft_wc{}_wc_overlay_in_messages", workchain_id),
+            format!("smft_wc{}_wc_overlay_in_messages_size", workchain_id),
+            format!("smft_wc{}_wc_overlay_in_messages", workchain_id),
             0.0,
         );
 
         add_compute_relative_metric(
             metrics_dumper,
             &format!("smft_wc{}_wc_overlay_out_message_avg_size", workchain_id),
-            &format!("smft_wc{}_wc_overlay_out_messages_size", workchain_id),
-            &format!("smft_wc{}_wc_overlay_out_messages", workchain_id),
+            format!("smft_wc{}_wc_overlay_out_messages_size", workchain_id),
+            format!("smft_wc{}_wc_overlay_out_messages", workchain_id),
             0.0,
         );
 
@@ -603,48 +603,48 @@ impl Workchain {
         add_compute_relative_metric(
             metrics_dumper,
             &format!("smft_wc{}_mc_overlay_in_broadcast_avg_size", workchain_id),
-            &format!("smft_wc{}_mc_overlay_in_broadcasts_size", workchain_id),
-            &format!("smft_wc{}_mc_overlay_in_broadcasts", workchain_id),
+            format!("smft_wc{}_mc_overlay_in_broadcasts_size", workchain_id),
+            format!("smft_wc{}_mc_overlay_in_broadcasts", workchain_id),
             0.0,
         );
 
         add_compute_relative_metric(
             metrics_dumper,
             &format!("smft_wc{}_mc_overlay_out_broadcast_avg_size", workchain_id),
-            &format!("smft_wc{}_mc_overlay_out_broadcasts_size", workchain_id),
-            &format!("smft_wc{}_mc_overlay_out_broadcasts", workchain_id),
+            format!("smft_wc{}_mc_overlay_out_broadcasts_size", workchain_id),
+            format!("smft_wc{}_mc_overlay_out_broadcasts", workchain_id),
             0.0,
         );
 
         add_compute_relative_metric(
             metrics_dumper,
             &format!("smft_wc{}_mc_overlay_in_query_avg_size", workchain_id),
-            &format!("smft_wc{}_mc_overlay_in_queries_size", workchain_id),
-            &format!("smft_wc{}_mc_overlay_in_queries", workchain_id),
+            format!("smft_wc{}_mc_overlay_in_queries_size", workchain_id),
+            format!("smft_wc{}_mc_overlay_in_queries", workchain_id),
             0.0,
         );
 
         add_compute_relative_metric(
             metrics_dumper,
             &format!("smft_wc{}_mc_overlay_out_query_avg_size", workchain_id),
-            &format!("smft_wc{}_mc_overlay_out_queries_size", workchain_id),
-            &format!("smft_wc{}_mc_overlay_out_queries.total", workchain_id),
+            format!("smft_wc{}_mc_overlay_out_queries_size", workchain_id),
+            format!("smft_wc{}_mc_overlay_out_queries.total", workchain_id),
             0.0,
         );
 
         add_compute_relative_metric(
             metrics_dumper,
             &format!("smft_wc{}_mc_overlay_in_message_avg_size", workchain_id),
-            &format!("smft_wc{}_mc_overlay_in_messages_size", workchain_id),
-            &format!("smft_wc{}_mc_overlay_in_messages", workchain_id),
+            format!("smft_wc{}_mc_overlay_in_messages_size", workchain_id),
+            format!("smft_wc{}_mc_overlay_in_messages", workchain_id),
             0.0,
         );
 
         add_compute_relative_metric(
             metrics_dumper,
             &format!("smft_wc{}_mc_overlay_out_message_avg_size", workchain_id),
-            &format!("smft_mc{}_wc_overlay_out_messages_size", workchain_id),
-            &format!("smft_mc{}_wc_overlay_out_messages", workchain_id),
+            format!("smft_mc{}_wc_overlay_out_messages_size", workchain_id),
+            format!("smft_mc{}_wc_overlay_out_messages", workchain_id),
             0.0,
         );
     }

@@ -199,7 +199,9 @@ impl std::cmp::PartialEq for dyn VoteCandidate {
 
 impl CacheObject<VoteCandidateImpl> for VoteCandidateImpl {
     fn compare(&self, value: &Self) -> bool {
-        self.block == value.block && &self.voted_by == &value.voted_by && self.hash == value.hash
+        self.block == value.block &&
+        self.voted_by.as_ref() == value.voted_by.as_ref() &&
+        self.hash == value.hash
     }
 }
 
@@ -259,8 +261,8 @@ impl VoteCandidateImpl {
         Self {
             pool: SessionPool::Temp,
             hash: Self::compute_hash(&block, &voted_by),
-            block: block,
-            voted_by: voted_by,
+            block,
+            voted_by,
             instance_counter: instance_counter.clone(),
         }
     }

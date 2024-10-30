@@ -232,7 +232,7 @@ pub fn parse_short_filename(filename: &str) -> Result<(i32, u64, u32)> {
         SeqNo,
         Count = 5
     }
-    fn parse_ids(ids: &Vec<&str>) -> Result<(i32, u64, u32)> {
+    fn parse_ids(ids: Vec<&str>) -> Result<(i32, u64, u32)> {
         if ids.len() != Id::Count as usize {
             fail!("too short")
         } else {
@@ -244,7 +244,7 @@ pub fn parse_short_filename(filename: &str) -> Result<(i32, u64, u32)> {
             Ok(ret)
         }
     }
-    parse_ids(&filename.split('_').collect()).map_err(
+    parse_ids(filename.split('_').collect()).map_err(
         |e| error!("Invalid block file name {}: {}", filename, e)
     )
 }

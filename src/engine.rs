@@ -12,7 +12,7 @@
 */
 
 use crate::{
-    block::{BlockStuff, BlockIdExtExtention, BlockKind},
+    block::{BlockIdExtExtention, BlockKind, BlockStuff},
     block_proof::BlockProofStuff, boot,
     config::{
         CollatorConfig, CollatorTestBundlesGeneralConfig, TonNodeConfig, ValidatorManagerConfig
@@ -22,16 +22,12 @@ use crate::{
     },
     ext_messages::{MessagesPool, EXT_MESSAGES_TRACE_TARGET},
     full_node::{
-        apply_block::{self, apply_block}, mesh_client::MeshClient,
-        shard_client::{
-            process_block_broadcast, start_masterchain_client, start_shards_client,
-            SHARD_BROADCAST_WINDOW, apply_proof_chain,
-        },
-        counters::TpsCounter, remp_client::RempClient
+        apply_block::{self, apply_block}, counters::TpsCounter, mesh_client::MeshClient, remp_client::RempClient, shard_client::{
+            apply_proof_chain, process_block_broadcast, start_masterchain_client, start_shards_client, SHARD_BROADCAST_WINDOW
+        }
     },
     internal_db::{
-        InternalDb, InternalDbConfig, 
-        INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, PSS_KEEPER_MC_BLOCK, ARCHIVES_GC_BLOCK
+        InternalDb, InternalDbConfig, ARCHIVES_GC_BLOCK, INITIAL_MC_BLOCK, LAST_APPLIED_MC_BLOCK, PSS_KEEPER_MC_BLOCK
     },
     network::{
         control::{ControlServer, DataSource, StatusReporter},
@@ -39,8 +35,7 @@ use crate::{
         node_network::NodeNetwork
     },
     shard_blocks::{
-        ShardBlocksPool, resend_top_shard_blocks_worker, save_top_shard_blocks_worker, 
-        ShardBlockProcessingResult
+        resend_top_shard_blocks_worker, save_top_shard_blocks_worker, ShardBlockProcessingResult, ShardBlocksPool
     },
     shard_state::ShardStateStuff,
     shard_states_keeper::ShardStatesKeeper,
@@ -61,7 +56,7 @@ use crate::internal_db::EXTERNAL_DB_BLOCK;
 #[cfg(feature = "slashing")]
 use crate::validator::{
     slashing::{ValidatedBlockStat, ValidatedBlockStatNode},
-    validator_utils::calc_subset_for_workchain_standard,
+    validator_utils::try_calc_subset_for_workchain_standard,
 };
 #[cfg(feature = "telemetry")]
 use crate::{
@@ -1838,12 +1833,13 @@ impl Engine {
         } else {
             last_mc_state.shards()?.calc_shard_cc_seqno(shard)?
         };
-        let validators = calc_subset_for_workchain_standard(
+        let validators = try_calc_subset_for_workchain_standard(
             &cur_validator_set,
             last_mc_state.config_params()?,
             shard,
             cc_seqno
-        )?;
+        )?
+        .ok_or_else(|| error!("Cannot compute validator set for workchain {}", shard))?;
 
         let mut nodes = Vec::new();
 

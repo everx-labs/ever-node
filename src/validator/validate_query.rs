@@ -346,8 +346,10 @@ impl ValidateQuery {
 
         // 3. load state(s) corresponding to previous block(s)
         for i in 0..base.prev_blocks_ids.len() {
-            log::debug!(target: "validate_query", "({}): load state for prev block {} of {} {}", self.next_block_descr, i + 1, base.prev_blocks_ids.len(), base.prev_blocks_ids[i]);
-            let prev_state = (self.engine.clone()).wait_state(&base.prev_blocks_ids[i], Some(1_000), true).await?;
+            log::debug!(target: "validate_query", "({}): load state for prev block {} of {} {}",
+                self.next_block_descr, i + 1, base.prev_blocks_ids.len(), base.prev_blocks_ids[i]);
+            let prev_state = self.engine.clone()
+                .wait_state(&base.prev_blocks_ids[i], Some(1_000), true).await?;
             if &self.shard == prev_state.shard() && prev_state.state()?.before_split() {
                 reject_query!("cannot accept new unsplit shardchain block for {} \
                     after previous block {} with before_split set", self.shard, prev_state.block_id())

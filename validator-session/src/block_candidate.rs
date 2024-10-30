@@ -185,7 +185,7 @@ impl BlockCandidateSignatureImpl {
     fn new(signature: BlockSignature, instance_counter: &CachedInstanceCounter) -> Self {
         Self {
             hash: Self::compute_hash(&signature),
-            signature: signature,
+            signature,
             pool: SessionPool::Temp,
             instance_counter: instance_counter.clone(),
         }
@@ -404,7 +404,7 @@ impl std::cmp::PartialEq for dyn BlockCandidate {
 impl CacheObject<BlockCandidateImpl> for BlockCandidateImpl {
     fn compare(&self, value: &Self) -> bool {
         self.block == value.block
-            && &self.approved_by == &value.approved_by
+            && self.approved_by.eq(&value.approved_by)
             && self.hash == value.hash
     }
 }
@@ -476,8 +476,8 @@ impl BlockCandidateImpl {
         Self {
             hash: Self::compute_hash(&block, &approved_by),
             pool: SessionPool::Temp,
-            block: block,
-            approved_by: approved_by,
+            block,
+            approved_by,
             instance_counter: instance_counter.clone(),
         }
     }

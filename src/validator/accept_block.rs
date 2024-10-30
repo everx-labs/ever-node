@@ -537,7 +537,9 @@ pub fn visit_block_for_proof(block: &Block, id: &BlockIdExt) -> Result<()> {
     // Visit header
 
     let info = block.read_info()?;
-    let _prev_ref = info.read_prev_ref()?;
+    let prev_ref = info.read_prev_ref()?;
+    let _ = prev_ref.prev1()?;
+    let _ = prev_ref.prev2()?;
     let _prev_vert_ref = info.read_prev_vert_ref()?;
     let master_ref = info.read_master_ref()?;
     let extra = block.read_extra()?;
