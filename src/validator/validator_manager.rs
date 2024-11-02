@@ -17,11 +17,18 @@ use crate::{
     engine_traits::EngineOperations,
     shard_state::ShardStateStuff,
     validator::{
-        out_msg_queue::OutMsgQueueInfoStuff, remp_block_parser::{find_previous_sessions, RempMasterblockObserver}, remp_manager::{RempInterfaceQueues, RempManager}, sessions_computing::{
+        out_msg_queue::OutMsgQueueInfoStuff, remp_block_parser::{find_previous_sessions, RempMasterblockObserver},
+        remp_manager::{RempInterfaceQueues, RempManager},
+        sessions_computing::{
             GeneralSessionInfo, SessionValidatorsCache, SessionValidatorsInfo, SessionValidatorsList
-        }, validator_group::{ValidatorGroup, ValidatorGroupStatus}, validator_utils::{
-            compute_validator_list_id, get_block_info_by_id, get_group_members_by_validator_descrs, get_masterchain_seqno, is_remp_enabled, try_calc_subset_for_workchain, validatordescr_to_catchain_node, validatorset_to_string, ValidatorListHash, ValidatorSubsetInfo
-        }, verification
+        },
+        validator_group::{ValidatorGroup, ValidatorGroupStatus},
+        validator_utils::{
+            compute_validator_list_id, get_block_info_by_id, get_group_members_by_validator_descrs,
+            get_masterchain_seqno, is_remp_enabled, try_calc_subset_for_workchain, validatordescr_to_catchain_node,
+            validatorset_to_string, ValidatorListHash, ValidatorSubsetInfo
+        },
+        verification
     },
 };
 use crate::validator::{
