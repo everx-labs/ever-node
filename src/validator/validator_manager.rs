@@ -556,7 +556,11 @@ impl ValidatorManagerImpl {
     }
 
     async fn stop_and_remove_sessions(
-        &mut self, sessions_to_remove: &HashSet<UInt256>, new_master_cc_range: Option<RangeInclusive<u32>>, new_session_options: &validator_session::SessionOptions
+        &mut self,
+        sessions_to_remove: &HashSet<UInt256>,
+        new_master_cc_range: Option<RangeInclusive<u32>>,
+        new_session_options: &validator_session::SessionOptions,
+        destroy_database: bool
     ) {
         for id in sessions_to_remove.iter() {
             log::trace!(target: "validator_manager", "stop&remove: removing {:x}", id);
@@ -584,7 +588,8 @@ impl ValidatorManagerImpl {
                             if let Err(e) = session.clone().stop(
                                 self.rt.clone(),
                                 new_master_cc_range.clone(),
-                                new_session_options
+                                new_session_options,
+                                destroy_database
                             ).await {
                                 log::error!(target: "validator_manager",
                                     "Could not stop session {:x}: `{}`", id, e);
@@ -792,17 +797,33 @@ impl ValidatorManagerImpl {
         Ok(())
     }
 
-    async fn disable_validation(&mut self, session_options: &validator_session::SessionOptions) -> Result<()> {
+    async fn disable_validation(
+        &mut self,
+        session_options: &validator_session::SessionOptions,
+        clear_rotation: bool
+    ) -> Result<()> {
         self.engine.set_validation_status(ValidationStatus::Disabled);
 
         let existing_validator_sessions: HashSet<UInt256> =
             self.validator_sessions.keys().cloned().collect();
-        self.stop_and_remove_sessions(&existing_validator_sessions, None, session_options).await;
+        self.stop_and_remove_sessions(&existing_validator_sessions, None, session_options, clear_rotation).await;
         self.garbage_collect().await;
         self.engine.set_will_validate(false);
-        self.engine.clear_last_rotation_block_id()?;
+        if clear_rotation {
+            self.engine.clear_last_rotation_block_id()?;
+        }
         log::info!(target: "validator_manager", "All sessions were removed, validation disabled");
         Ok(())
+    }
+
+    async fn stop_validation(&mut self) {
+        if let Err(e) = self.disable_validation(false).await {
+            log::error!(target: "validator_manager", "Cannot disable validation: {}", e);
+        };
+
+        if let Some(remp_manager) = &self.remp_manager {
+            remp_manager.catchain_store.clone().gc_catchain_sessions(self.rt.clone(), HashSet::new()).await
+        };
     }
 
     fn enable_validation(&mut self) {
@@ -1027,7 +1048,7 @@ impl ValidatorManagerImpl {
 
         if !self.update_validator_lists(&mc_state).await? {
             log::info!(target: "validator_manager", "Current validator list is empty, validation is disabled.");
-            self.disable_validation(&session_options).await?;
+            self.disable_validation(&session_options, true).await?;
             return Ok(())
         }
 
@@ -1443,7 +1464,12 @@ impl ValidatorManagerImpl {
         }
 
         log::trace!(target: "validator_manager", "starting stop&remove");
-        self.stop_and_remove_sessions(&gc_validator_sessions, Some(master_cc_range), &session_options).await;
+        self.stop_and_remove_sessions(
+            &gc_validator_sessions,
+            Some(master_cc_range),
+            &session_options,
+            true
+        ).await;
         log::trace!(target: "validator_manager", "starting garbage collect");
         self.garbage_collect().await;
         log::trace!(target: "validator_manager", "exiting");
@@ -1722,16 +1748,18 @@ pub fn start_validator_manager(
                 log::error!(target: "validator_manager", "set_remp_core_interface: {}", e);
             }
 
-            runtime.clone().spawn(async move { 
+            runtime.clone().spawn(async move {
                 log::info!(target: "remp", "Starting REMP responses polling loop");
-                remp_iface.poll_responses_loop().await; 
+                remp_iface.poll_responses_loop().await;
                 log::info!(target: "remp", "Finishing REMP responses polling loop");
             });
         }
 
         if let Err(e) = manager.invoke().await {
-            log::error!(target: "validator_manager", "FATAL!!! Unexpected error in validator manager: {:?}", e);
+            log::error!(target: "validator_manager", "FATAL!!! Unexpected error in validator manager: {}", e);
         }
+
+        manager.stop_validation().await;
         log::info!(target: "validator_manager", "Exiting, validator manager is stopped");
         engine.release_stop(Engine::MASK_SERVICE_VALIDATOR_MANAGER);
     });

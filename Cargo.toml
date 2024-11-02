@@ -2,7 +2,7 @@
 build = 'common/build/build.rs'
 edition = '2021'
 name = 'ever-node'
-version = '0.60.8'
+version = '0.60.9'
 
 [workspace]
 

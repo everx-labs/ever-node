@@ -475,9 +475,15 @@ impl ValidatorGroup {
         Ok(())
     }
 
-    pub async fn stop(self: Arc<ValidatorGroup>, rt: tokio::runtime::Handle, new_master_cc_range: Option<RangeInclusive<u32>>, new_session_options: &validator_session::SessionOptions) -> Result<()> {
+    pub async fn stop(
+        self: Arc<ValidatorGroup>,
+        rt: tokio::runtime::Handle,
+        new_master_cc_range: Option<RangeInclusive<u32>>,
+        new_session_options: &validator_session::SessionOptions,
+        destroy_database: bool
+    ) -> Result<()> {
         self.set_status(ValidatorGroupStatus::Stopping).await?;
-        log::debug!(target: "validator", "Stopping group: {}", self.info().await);
+        log::info!(target: "validator", "Stopping group: {} (destroy database {})", self.info().await, destroy_database);
         let group_impl = self.group_impl.clone();
         let self_clone = self.clone();
         let new_remp_catchain_options = construct_remp_catchain_options_from_config(new_session_options);
@@ -503,8 +509,13 @@ impl ValidatorGroup {
                 log::debug!(target: "validator", "Group stopped: {}", self_clone.info().await);
                 let _ = self_clone.set_status(ValidatorGroupStatus::Stopped).await;
                 log::info!(target: "validator", "Status set: {}", self_clone.info().await);
-                let _ = self_clone.destroy_db().await;
-                log::debug!(target: "validator", "Db destroyed: {}", self_clone.info().await);
+                if destroy_database {
+                    let _ = self_clone.destroy_db().await;
+                    log::debug!(target: "validator", "Db destroyed: {}", self_clone.info().await);
+                }
+                else {
+                    log::debug!(target: "validator", "Db destroy skipped (destroy_databse option set to false): {}", self_clone.info().await);
+                }
             }
         });
         log::debug!(target: "validator", "Stopping group {}, stop spawned", self.info().await);

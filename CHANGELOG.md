@@ -2,9 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.60.9
+
+- SMFT arbitrage
+- Added REMP blocks enumeration (get rid of equal blocks)
+
 ## Version 0.60.8
 
-- Added REMP blocks enumeration (get rid of equal blocks)
+- Forcing stop of all catchains when node shuts down
 
 ## Version 0.60.7
 
@@ -12,7 +17,6 @@ All notable changes to this project will be documented in this file.
 
 ## Version 0.60.6
 
-- SMFT arbitrage
 - Fixed clippy warnings
 
 ## Version 0.60.5
