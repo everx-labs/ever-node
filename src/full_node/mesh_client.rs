@@ -6,6 +6,7 @@ use std::{
 };
 
 use ever_block::{BlockIdExt, ConnectedNwConfig, error, fail, Result};
+#[cfg(not(feature = "external_db"))]
 use ton_api::ton::ton_node::broadcast::MeshUpdateBroadcast;
 
 use storage::block_handle_db::BlockHandle;
@@ -16,9 +17,9 @@ use crate::{
 
 #[derive(Clone)]
 enum BlockProofOrZerostate {
-    KeyBlock(BlockProofStuff),
-    Zerostate(Arc<ShardStateStuff>),
     None,
+    KeyBlock(Arc<BlockProofStuff>),
+    Zerostate(Arc<ShardStateStuff>),
 }
 
 impl BlockProofOrZerostate {
@@ -26,7 +27,7 @@ impl BlockProofOrZerostate {
         Self::Zerostate(zerostate)
     }
     pub fn with_key_block(proof: BlockProofStuff) -> Self {
-        Self::KeyBlock(proof)
+        Self::KeyBlock(Arc::new(proof))
     }
     pub fn block_proof(&self) -> Option<&BlockProofStuff> {
         match self {
@@ -133,11 +134,9 @@ impl<'a> Boot<'a> {
                 fail!("init block {} is older then last hardfork {}", 
                     self.nw_config.init_block, last_hf);
             }
-            if last_hf.seq_no() == self.nw_config.init_block.seq_no() {
-                if last_hf != &self.nw_config.init_block {
-                    fail!("init block {} is not equal to last hardfork {} with same seqno", 
-                        self.nw_config.init_block, last_hf);
-                }
+            if last_hf.seq_no() == self.nw_config.init_block.seq_no() && last_hf != &self.nw_config.init_block {
+                fail!("init block {} is not equal to last hardfork {} with same seqno", 
+                    self.nw_config.init_block, last_hf);
             }
         }
         Ok(())
@@ -170,27 +169,31 @@ impl<'a> Boot<'a> {
             }
 
             if let Some(last_commited_block) = &last_commited_block {
-                if last_commited_block.seq_no() < last_hf.seq_no() {
-                    log::info!(
-                        "{}: last hardfork is {}, last commited block is {}. Continue with hardfork",
-                        self.descr, last_hf, last_commited_block
-                    );
-                } else if last_commited_block.seq_no() == last_hf.seq_no() {
-                    if last_commited_block != last_hf {
+                match last_commited_block.seq_no().cmp(&last_hf.seq_no()) {
+                    std::cmp::Ordering::Less => {
+                        log::info!(
+                            "{}: last hardfork is {}, last commited block is {}. Continue with hardfork",
+                            self.descr, last_hf, last_commited_block
+                        );
+                    }
+                    std::cmp::Ordering::Equal => {
+                        if last_commited_block != last_hf {
+                            fail!(
+                                "FATAL: last commited block {} is not equal to last hardfork {}",
+                                last_commited_block, last_hf
+                            );
+
+                            // TODO: clean up DB and continue?
+                        }
+                    }
+                    std::cmp::Ordering::Greater => {
                         fail!(
-                            "FATAL: last commited block {} is not equal to last hardfork {}",
+                            "FATAL: last commited block {} is newer than last hardfork {}",
                             last_commited_block, last_hf
                         );
 
                         // TODO: clean up DB and continue?
                     }
-                } else if last_commited_block.seq_no() > last_hf.seq_no() {
-                    fail!(
-                        "FATAL: last commited block {} is newer then last hardfork {}",
-                        last_commited_block, last_hf
-                    );
-
-                    // TODO: clean up DB and continue?
                 }
             }
 
@@ -403,16 +406,14 @@ impl<'a> Boot<'a> {
         } else if is_hardfork {
             proof.check_proof_link()
                 .map_err(|e| error!("Block proof link {} check failed: {}", block_id, e))?;
+        } else if let Some(zerostate) = prev_key_block_proof_or_zs.zerostate() {
+            proof.check_with_master_state(zerostate)
+                .map_err(|e| error!("Block proof {} check failed: {}", block_id, e))?;
+        } else if let Some(prev_key_block_proof) = prev_key_block_proof_or_zs.block_proof() {
+            proof.check_with_prev_key_block_proof(prev_key_block_proof)
+                .map_err(|e| error!("Block proof {} check failed: {}", block_id, e))?;
         } else {
-            if let Some(zerostate) = prev_key_block_proof_or_zs.zerostate() {
-                proof.check_with_master_state(zerostate)
-                    .map_err(|e| error!("Block proof {} check failed: {}", block_id, e))?;
-            } else if let Some(prev_key_block_proof) = prev_key_block_proof_or_zs.block_proof() {
-                proof.check_with_prev_key_block_proof(prev_key_block_proof)
-                    .map_err(|e| error!("Block proof {} check failed: {}", block_id, e))?;
-            } else {
-                fail!("INTERNAL ERROR: there is no both zerostate and prev key block proof");
-            }
+            fail!("INTERNAL ERROR: there is no both zerostate and prev key block proof")
         }
 
         // Save to DB
@@ -519,7 +520,7 @@ impl<'a> Boot<'a> {
                     continue 'top;
                 }
             } else {
-                fail!("INTERNAL ERROR: there is no both zerostate and prev key block proof");
+                fail!("INTERNAL ERROR: there is no both zerostate and prev key block proof")
             }
 
             // Save queues
@@ -560,7 +561,7 @@ pub struct ConnectedNwClient {
     engine: Arc<dyn EngineOperations>,
     nw_id: i32,
     descr: String,
-    last_key_block_proof: parking_lot::RwLock<Arc<BlockProofOrZerostate>>,
+    last_key_block_proof: parking_lot::RwLock<BlockProofOrZerostate>,
     last_applied_block_seqno: AtomicU32,
     cancellation_token: tokio_util::sync::CancellationToken,
 }
@@ -578,7 +579,7 @@ impl ConnectedNwClient {
             engine, 
             nw_id,
             descr,
-            last_key_block_proof: parking_lot::RwLock::new(Arc::new(BlockProofOrZerostate::None)),
+            last_key_block_proof: parking_lot::RwLock::new(BlockProofOrZerostate::None),
             last_applied_block_seqno: AtomicU32::new(0),
             cancellation_token: cancellation_token.clone(),
         });
@@ -605,7 +606,7 @@ impl ConnectedNwClient {
                 };
 
                 client.set_last_applied_block_seqno(last_mc_block.id().seq_no);
-                client.set_last_key_block_proof(Arc::new(last_key_block));
+                client.set_last_key_block_proof(last_key_block);
 
                 // Start worker
                 if let Err(e) = client.worker(last_mc_block).await {
@@ -621,6 +622,7 @@ impl ConnectedNwClient {
         self.cancellation_token.cancel();
     }
 
+    #[cfg(not(feature = "external_db"))]
     pub async fn process_broadcast(&self, broadcast: MeshUpdateBroadcast) -> Result<()> {
         log::debug!("{}: process_broadcast {}", self.descr, broadcast.id);
 
@@ -722,18 +724,18 @@ impl ConnectedNwClient {
     ) -> Result<Arc<BlockHandle>> {
         // save
         log::trace!("{}:{} saving mesh update {}...", self.descr, logged_prefix, mesh_update.id());
-        let mut handle = self.engine.store_block(&mesh_update).await?.to_any();
+        let mut handle = self.engine.store_block(mesh_update).await?.to_any();
 
         // apply
         log::trace!("{}:{} applying mesh update {}...", self.descr, logged_prefix, mesh_update.id());
-        self.engine.clone().apply_block(&handle, &mesh_update, 0, false).await?;
+        self.engine.clone().apply_block(&handle, mesh_update, 0, false).await?;
         self.set_last_applied_block_seqno(mesh_update.id().seq_no);
 
         if mesh_update.is_key_block()? {
             log::trace!("{}:{} update last key block to: {}", self.descr, logged_prefix, mesh_update.id());
             handle = self.engine.store_block_proof(
                 self.nw_id, proof.id(), Some(handle), &proof).await?.to_any();
-            self.set_last_key_block_proof(Arc::new(BlockProofOrZerostate::KeyBlock(proof)));
+            self.set_last_key_block_proof(BlockProofOrZerostate::with_key_block(proof));
             self.engine.save_last_mesh_key_block_id(self.nw_id, mesh_update.id())?;
         }
 
@@ -754,12 +756,12 @@ impl ConnectedNwClient {
             );
             proof.check_with_prev_key_block_proof(key_block_proof)?;
         } else {
-            fail!("INTERNAL ERROR: there is no both zerostate and prev key block proof");
+            fail!("INTERNAL ERROR: there is no both zerostate and prev key block proof")
         }
         Ok(())
     }
 
-    fn last_key_block_proof(&self) -> Arc<BlockProofOrZerostate> {
+    fn last_key_block_proof(&self) -> BlockProofOrZerostate {
         let now = Instant::now();
         let p = self.last_key_block_proof.read().clone();
         if now.elapsed().as_millis() > 1 {
@@ -769,7 +771,7 @@ impl ConnectedNwClient {
         p
     }
 
-    fn set_last_key_block_proof(&self, proof: Arc<BlockProofOrZerostate>) {
+    fn set_last_key_block_proof(&self, proof: BlockProofOrZerostate) {
         let now = Instant::now();
         *self.last_key_block_proof.write() = proof;
         if now.elapsed().as_millis() > 1 {
@@ -956,6 +958,7 @@ impl MeshClient {
         Ok(())
     }
 
+    #[cfg(not(feature = "external_db"))]
     pub async fn process_broadcast(&self, broadcast: MeshUpdateBroadcast) -> Result<()> {
     
         let client = self.clients.get(&broadcast.src_nw)

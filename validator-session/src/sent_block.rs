@@ -102,7 +102,7 @@ impl SentBlockWrapper for SentBlockPtr {
     fn get_id(&self) -> &BlockId {
         match self {
             Some(block) => block.get_id(),
-            None => &*SKIP_ROUND_CANDIDATE_BLOCKID,
+            None => &SKIP_ROUND_CANDIDATE_BLOCKID,
         }
     }
 }
@@ -252,6 +252,7 @@ impl SentBlockImpl {
         Object creation
     */
 
+    #[allow(clippy::too_many_arguments)]
     fn new(
         source_id: u32,
         root_hash: BlockHash,
@@ -273,7 +274,7 @@ impl SentBlockImpl {
 
         Self {
             pool: SessionPool::Temp,
-            source_id: source_id,
+            source_id,
             root_hash: root_hash.clone(),
             file_hash: file_hash.clone(),
             collated_data_file_hash: collated_data_file_hash.clone(),
@@ -286,8 +287,8 @@ impl SentBlockImpl {
                 &candidate_id.clone(),
             ),
             instance_counter: instance_counter.clone(),
-            block_creation_time: block_creation_time,
-            block_payload_creation_time: block_payload_creation_time,
+            block_creation_time,
+            block_payload_creation_time,
             sent_block_creation_time: std::time::SystemTime::now(),
         }
     }
@@ -328,8 +329,8 @@ impl SentBlockImpl {
             BlockHash::default(),
             BlockHash::default(),
             BlockHash::default(),
-            now.clone(),
-            now.clone(),
+            now,
+            now,
         )
     }
 }

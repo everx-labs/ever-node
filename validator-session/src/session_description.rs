@@ -248,7 +248,7 @@ impl SessionDescription for SessionDescriptionImpl {
     fn get_attempt_sequence_number(&self, ts: u64) -> u32 {
         let round_attempt_duration_in_secs: u32 =
             self.options.round_attempt_duration.as_secs() as u32;
-        (self.get_unixtime(ts) / round_attempt_duration_in_secs) as u32
+        self.get_unixtime(ts) / round_attempt_duration_in_secs
     }
 
     fn get_ts(&self) -> u64 {
@@ -310,9 +310,9 @@ impl SessionDescription for SessionDescriptionImpl {
     ) -> BlockId {
         let candidate_id = ::ton_api::ton::validator_session::candidateid::CandidateId {
             src: UInt256::with_array(*self.get_source_public_key_hash(src_idx).data()),
-            root_hash: root_hash.clone().into(),
-            file_hash: file_hash.clone().into(),
-            collated_data_file_hash: collated_data_file_hash.clone().into(),
+            root_hash: root_hash.clone(),
+            file_hash: file_hash.clone(),
+            collated_data_file_hash: collated_data_file_hash.clone(),
         }
         .into_boxed();
         let serialized_candidate_id = serialize_tl_boxed_object!(&candidate_id);
@@ -328,8 +328,8 @@ impl SessionDescription for SessionDescriptionImpl {
         signature: &BlockSignature,
     ) -> Result<()> {
         let block_id = ton_api::ton::ton::blockid::BlockId {
-            root_cell_hash: root_hash.clone().into(),
-            file_hash: file_hash.clone().into(),
+            root_cell_hash: root_hash.clone(),
+            file_hash: file_hash.clone(),
         }
         .into_boxed();
         let serialized_block_id = serialize_tl_boxed_object!(&block_id);
@@ -347,8 +347,8 @@ impl SessionDescription for SessionDescriptionImpl {
         signature: &BlockSignature,
     ) -> Result<()> {
         let block_id = ton_api::ton::ton::blockid::BlockIdApprove {
-            root_cell_hash: root_hash.clone().into(),
-            file_hash: file_hash.clone().into(),
+            root_cell_hash: root_hash.clone(),
+            file_hash: file_hash.clone(),
         }
         .into_boxed();
         let serialized_block_id = serialize_tl_boxed_object!(&block_id);
@@ -444,7 +444,7 @@ impl SessionCache for SessionDescriptionImpl {
         let mut cache_index = hash as usize % PERSISTENT_CACHE_SIZE;
 
         if let Some(ref entry) = self.persistent_objects_cache[cache_index] {
-            return Some(&entry);
+            return Some(entry);
         }
 
         if !allow_temp {
@@ -454,7 +454,7 @@ impl SessionCache for SessionDescriptionImpl {
         cache_index = hash as usize % TEMP_CACHE_SIZE;
 
         match &self.temp_objects_cache[cache_index] {
-            Some(entry) => Some(&entry),
+            Some(entry) => Some(entry),
             _ => None,
         }
     }
@@ -543,11 +543,10 @@ impl SessionDescriptionImpl {
         let mut total_weight = 0;
         let mut sources = Vec::new();
         let mut rev_sources = HashMap::new();
-        let mut node_index = 0;
 
         sources.reserve(nodes.len());
 
-        for node in nodes {
+        for (node_index, node) in nodes.iter().enumerate() {
             let source = Source {
                 public_key: node.public_key.clone(),
                 adnl_id: node.adnl_id.clone(),
@@ -559,7 +558,6 @@ impl SessionDescriptionImpl {
             sources.push(source);
 
             total_weight += node.weight;
-            node_index += 1;
         }
 
         let cutoff_weight = total_weight * 2 / 3 + 1;
@@ -582,88 +580,86 @@ impl SessionDescriptionImpl {
                 catchain::utils::MetricsHandle::new(None)
         };
 
-        let body = Self {
+        Self {
             options: *options,
             persistent_objects_cache: vec![None; PERSISTENT_CACHE_SIZE],
             temp_objects_cache: vec![None; TEMP_CACHE_SIZE],
             rng: rand::thread_rng(),
-            total_weight: total_weight,
-            cutoff_weight: cutoff_weight,
-            sources: sources,
-            rev_sources: rev_sources,
-            self_idx: self_idx,
+            total_weight,
+            cutoff_weight,
+            sources,
+            rev_sources,
+            self_idx,
             current_time: None,
             sent_blocks_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"sent_blocks".to_string(),
+                "sent_blocks",
             ),
             block_candidate_signatures_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"block_candidates_signatures".to_string(),
+                "block_candidates_signatures",
             ),
             block_candidates_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"block_candidates".to_string(),
+                "block_candidates",
             ),
             vote_candidates_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"vote_candidates".to_string(),
+                "vote_candidates",
             ),
             round_attempts_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"round_attempts".to_string(),
+                "round_attempts",
             ),
             rounds_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"rounds".to_string(),
+                "rounds",
             ),
             old_rounds_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"old_rounds".to_string(),
+                "old_rounds",
             ),
             session_states_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"session_states".to_string(),
+                "session_states",
             ),
             integer_vectors_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"integer_vectors".to_string(),
+                "integer_vectors",
             ),
             bool_vectors_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"bool_vectors".to_string(),
+                "bool_vectors",
             ),
             block_candidate_vectors_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"block_candidate_vectors".to_string(),
+                "block_candidate_vectors",
             ),
             block_candidate_signature_vectors_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"block_candidate_signature_vectors".to_string(),
+                "block_candidate_signature_vectors",
             ),
             vote_candidate_vectors_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"vote_candidate_vectors".to_string(),
+                "vote_candidate_vectors",
             ),
             round_attempt_vectors_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"round_attempt_vectors".to_string(),
+                "round_attempt_vectors",
             ),
             old_round_vectors_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"old_round_vectors".to_string(),
+                "old_round_vectors",
             ),
             temp_cache_reuse_counter: ResultStatusCounter::new(
                 &metrics_receiver,
-                &"temp_cache_reuse".to_owned(),
+                "temp_cache_reuse",
             ),
             persistent_cache_reuse_counter: ResultStatusCounter::new(
                 &metrics_receiver,
-                &"persistent_cache_reuse".to_owned(),
+                "persistent_cache_reuse",
             ),
-            metrics_receiver: metrics_receiver,
-        };
-
-        body
+            metrics_receiver,
+        }
     }
 }

@@ -179,7 +179,7 @@ impl SessionDescription for SessionDescriptionImpl {
     fn get_attempt_sequence_number(&self, ts: u64) -> u32 {
         let round_attempt_duration_in_secs: u32 =
             self.options.round_attempt_duration.as_secs() as u32;
-        (self.get_unixtime(ts) / round_attempt_duration_in_secs) as u32
+        self.get_unixtime(ts) / round_attempt_duration_in_secs
     }
 
     fn get_ts(&self) -> u64 {
@@ -228,9 +228,9 @@ impl SessionDescription for SessionDescriptionImpl {
     ) -> BlockId {
         let candidate_id = ::ton_api::ton::validator_session::candidateid::CandidateId {
             src: self.get_source_public_key_hash(src_idx).data().into(),
-            root_hash: root_hash.clone().into(),
-            file_hash: file_hash.clone().into(),
-            collated_data_file_hash: collated_data_file_hash.clone().into(),
+            root_hash: root_hash.clone(),
+            file_hash: file_hash.clone(),
+            collated_data_file_hash: collated_data_file_hash.clone(),
         }
         .into_boxed();
         let serialized_candidate_id = serialize_tl_boxed_object!(&candidate_id);
@@ -245,7 +245,7 @@ impl SessionDescription for SessionDescriptionImpl {
         _src_idx: u32,
         signature: &BlockSignature,
     ) -> Result<()> {
-        if signature.len() == 0 {
+        if signature.is_empty() {
             fail!("wrong size");
         }
 
@@ -263,7 +263,7 @@ impl SessionDescription for SessionDescriptionImpl {
         _src_idx: u32,
         signature: &BlockSignature,
     ) -> Result<()> {
-        if signature.len() == 0 {
+        if signature.is_empty() {
             fail!("wrong size");
         }
 
@@ -360,7 +360,7 @@ impl SessionCache for SessionDescriptionImpl {
         let mut cache_index = hash as usize % PERSISTENT_CACHE_SIZE;
 
         if let Some(ref entry) = self.persistent_objects_cache[cache_index] {
-            return Some(&entry);
+            return Some(entry);
         }
 
         if !allow_temp {
@@ -370,7 +370,7 @@ impl SessionCache for SessionDescriptionImpl {
         cache_index = hash as usize % TEMP_CACHE_SIZE;
 
         match &self.temp_objects_cache[cache_index] {
-            Some(entry) => Some(&entry),
+            Some(entry) => Some(entry),
             _ => None,
         }
     }
@@ -434,7 +434,7 @@ impl SessionDescriptionImpl {
             hashes.push(hash);
         }
 
-        let body = Self {
+        Self {
             options: *options,
             persistent_objects_cache: vec![None; PERSISTENT_CACHE_SIZE],
             temp_objects_cache: vec![None; TEMP_CACHE_SIZE],
@@ -442,68 +442,66 @@ impl SessionDescriptionImpl {
             hashes,
             sent_blocks_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"sent_blocks".to_string(),
+                "sent_blocks",
             ),
             block_candidate_signatures_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"block_candidates_signatures".to_string(),
+                "block_candidates_signatures",
             ),
             block_candidates_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"block_candidates".to_string(),
+                "block_candidates",
             ),
             vote_candidates_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"vote_candidates".to_string(),
+                "vote_candidates",
             ),
             round_attempts_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"round_attempts".to_string(),
+                "round_attempts",
             ),
             rounds_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"rounds".to_string(),
+                "rounds",
             ),
             old_rounds_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"old_rounds".to_string(),
+                "old_rounds",
             ),
             session_states_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"session_states".to_string(),
+                "session_states",
             ),
             integer_vectors_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"integer_vectors".to_string(),
+                "integer_vectors",
             ),
             bool_vectors_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"bool_vectors".to_string(),
+                "bool_vectors",
             ),
             block_candidate_vectors_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"block_candidate_vectors".to_string(),
+                "block_candidate_vectors",
             ),
             block_candidate_signature_vectors_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"block_candidate_signature_vectors".to_string(),
+                "block_candidate_signature_vectors",
             ),
             vote_candidate_vectors_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"vote_candidate_vectors".to_string(),
+                "vote_candidate_vectors",
             ),
             round_attempt_vectors_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"round_attempt_vectors".to_string(),
+                "round_attempt_vectors",
             ),
             old_round_vectors_instance_counter: CachedInstanceCounter::new(
                 &metrics_receiver,
-                &"old_round_vectors".to_string(),
+                "old_round_vectors",
             ),
-            metrics_receiver: metrics_receiver,
-        };
-
-        body
+            metrics_receiver,
+        }
     }
 }
 
@@ -529,7 +527,7 @@ fn check_empty_actions(
 }
 
 fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
-    let mut description = SessionDescriptionImpl::new(&options, total_nodes);
+    let mut description = SessionDescriptionImpl::new(options, total_nodes);
     let now = std::time::SystemTime::now();
 
     {
@@ -573,13 +571,13 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
         assert!(v.get_hash() == 2424132713);
     }
 
-    let zero_hash = BlockHash::default().into();
+    let zero_hash = BlockHash::default();
     let c1 = description.candidate_id(0, &zero_hash, &zero_hash, &zero_hash);
     let c2 = description.candidate_id(1, &zero_hash, &zero_hash, &zero_hash);
 
     assert!(c1 != c2);
 
-    let zero_hash: ever_block::UInt256 = zero_hash.into();
+    let zero_hash: ever_block::UInt256 = zero_hash;
     let mut state = SessionFactory::create_state(&mut description);
     let mut attempt_id = 1000000000;
 
@@ -601,8 +599,8 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
             1,
             attempt_id,
             &message,
-            now.clone(),
-            now.clone(),
+            now,
+            now,
         );
         state = state.move_to_persistent(description.get_cache());
 
@@ -615,11 +613,11 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
         //check approving & signing
 
         for i in 0..total_nodes {
-            let block = state.choose_block_to_sign(&mut description, i as u32);
+            let block = state.choose_block_to_sign(&description, i);
 
-            assert!(!block.is_some());
+            assert!(block.is_none());
 
-            let blocks_to_approve = state.choose_blocks_to_approve(&mut description, i as u32);
+            let blocks_to_approve = state.choose_blocks_to_approve(&description, i);
 
             assert!(blocks_to_approve.len() == 2);
             assert!(blocks_to_approve[0].is_some());
@@ -636,18 +634,18 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
             let signature = vec![127; 1];
             let action = ton::message::ApprovedBlock {
                 round: 0,
-                candidate: c2.clone().into(),
-                signature: signature,
+                candidate: c2.clone(),
+                signature,
             }
             .into_boxed();
 
             state = state.apply_action(
                 &mut description,
-                i as u32,
+                i,
                 attempt_id,
                 &action,
-                now.clone(),
-                now.clone(),
+                now,
+                now,
             );
             state = state.move_to_persistent(description.get_cache());
         }
@@ -664,18 +662,18 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
             let signature = vec![127; 1];
             let action = ton::message::ApprovedBlock {
                 round: 0,
-                candidate: c2.clone().into(),
-                signature: signature,
+                candidate: c2.clone(),
+                signature,
             }
             .into_boxed();
 
             state = state.apply_action(
                 &mut description,
-                i as u32,
+                i,
                 attempt_id,
                 &action,
-                now.clone(),
-                now.clone(),
+                now,
+                now,
             );
             state = state.move_to_persistent(description.get_cache());
         }
@@ -687,11 +685,11 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
         //check approving & signing
 
         for i in 0..total_nodes {
-            let block = state.choose_block_to_sign(&mut description, i as u32);
+            let block = state.choose_block_to_sign(&description, i);
 
-            assert!(!block.is_some());
+            assert!(block.is_none());
 
-            let blocks_to_approve = state.choose_blocks_to_approve(&mut description, i as u32);
+            let blocks_to_approve = state.choose_blocks_to_approve(&description, i);
 
             assert!(blocks_to_approve.len() == 1);
             assert!(blocks_to_approve[0].is_none());
@@ -719,8 +717,8 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
                 i,
                 attempt_id,
                 &action,
-                now.clone(),
-                now.clone(),
+                now,
+                now,
             );
             state = state.move_to_persistent(description.get_cache());
 
@@ -809,8 +807,8 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
                 i,
                 attempt_id,
                 &action,
-                now.clone(),
-                now.clone(),
+                now,
+                now,
             );
             state = state.move_to_persistent(description.get_cache());
 
@@ -835,7 +833,7 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
         //check signing candidate
 
         for i in 0..total_nodes {
-            let block = state.choose_block_to_sign(&mut description, i as u32);
+            let block = state.choose_block_to_sign(&description, i);
 
             assert!(block.is_some());
             assert!(block.unwrap().get_id() == &c2);
@@ -847,18 +845,18 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
             let signature = vec![126; 1];
             let action = ton::message::Commit {
                 round: 0,
-                candidate: c2.clone().into(),
-                signature: signature,
+                candidate: c2.clone(),
+                signature,
             }
             .into_boxed();
 
             state = state.apply_action(
                 &mut description,
-                i as u32,
+                i,
                 attempt_id,
                 &action,
-                now.clone(),
-                now.clone(),
+                now,
+                now,
             );
             state = state.move_to_persistent(description.get_cache());
         }
@@ -870,18 +868,18 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
             let signature = vec![126; 1];
             let action = ton::message::Commit {
                 round: 0,
-                candidate: c2.clone().into(),
-                signature: signature,
+                candidate: c2.clone(),
+                signature,
             }
             .into_boxed();
 
             state = state.apply_action(
                 &mut description,
-                i as u32,
+                i,
                 attempt_id,
                 &action,
-                now.clone(),
-                now.clone(),
+                now,
+                now,
             );
             state = state.move_to_persistent(description.get_cache());
         }
@@ -922,8 +920,8 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
                 i,
                 attempt_id,
                 &action,
-                now.clone(),
-                now.clone(),
+                now,
+                now,
             );
             state = state.move_to_persistent(description.get_cache());
 
@@ -972,8 +970,8 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
                     i,
                     attempt_id,
                     &action,
-                    now.clone(),
-                    now.clone(),
+                    now,
+                    now,
                 );
                 state = state.move_to_persistent(description.get_cache());
 
@@ -1015,8 +1013,8 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
             0,
             attempt_id,
             &message,
-            now.clone(),
-            now.clone(),
+            now,
+            now,
         );
         state = state.move_to_persistent(description.get_cache());
 
@@ -1040,18 +1038,18 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
             let signature = vec![127; 1];
             let action = ton::message::ApprovedBlock {
                 round: 0,
-                candidate: c1.clone().into(),
-                signature: signature,
+                candidate: c1.clone(),
+                signature,
             }
             .into_boxed();
 
             state = state.apply_action(
                 &mut description,
-                i as u32,
+                i,
                 attempt_id,
                 &action,
-                now.clone(),
-                now.clone(),
+                now,
+                now,
             );
             state = state.move_to_persistent(description.get_cache());
         }
@@ -1065,7 +1063,7 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
         let mut action = state.generate_vote_for(&mut description, idx, attempt_id);
 
         if let ton::Message::ValidatorSession_Message_VoteFor(ref mut vote_for) = action {
-            vote_for.candidate = c1.clone().into();
+            vote_for.candidate = c1.clone();
         } else {
             unreachable!();
         }
@@ -1075,8 +1073,8 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
             idx,
             attempt_id,
             &action,
-            now.clone(),
-            now.clone(),
+            now,
+            now,
         );
         state = state.move_to_persistent(description.get_cache());
 
@@ -1111,11 +1109,11 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
 
             state = state.apply_action(
                 &mut description,
-                i as u32,
+                i,
                 attempt_id,
                 &action,
-                now.clone(),
-                now.clone(),
+                now,
+                now,
             );
             state = state.move_to_persistent(description.get_cache());
         }
@@ -1152,11 +1150,11 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
 
             state = state.apply_action(
                 &mut description,
-                i as u32,
+                i,
                 attempt_id,
                 &action,
-                now.clone(),
-                now.clone(),
+                now,
+                now,
             );
             state = state.move_to_persistent(description.get_cache());
         }
@@ -1170,7 +1168,7 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
         let mut action = state.generate_vote_for(&mut description, idx, attempt_id);
 
         if let ton::Message::ValidatorSession_Message_VoteFor(ref mut vote_for) = action {
-            vote_for.candidate = c1.clone().into();
+            vote_for.candidate = c1.clone();
         } else {
             unreachable!();
         }
@@ -1180,8 +1178,8 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
             idx,
             attempt_id,
             &action,
-            now.clone(),
-            now.clone(),
+            now,
+            now,
         );
         state = state.move_to_persistent(description.get_cache());
 
@@ -1206,11 +1204,11 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
 
             state = state.apply_action(
                 &mut description,
-                i as u32,
+                i,
                 attempt_id,
                 &action,
-                now.clone(),
-                now.clone(),
+                now,
+                now,
             );
             state = state.move_to_persistent(description.get_cache());
         }
@@ -1236,11 +1234,11 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
 
             state = state.apply_action(
                 &mut description,
-                i as u32,
+                i,
                 attempt_id,
                 &action,
-                now.clone(),
-                now.clone(),
+                now,
+                now,
             );
             state = state.move_to_persistent(description.get_cache());
 
@@ -1269,7 +1267,7 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
         let mut action = state.generate_vote_for(&mut description, idx, attempt_id);
 
         if let ton::Message::ValidatorSession_Message_VoteFor(ref mut vote_for) = action {
-            vote_for.candidate = c1.clone().into();
+            vote_for.candidate = c1.clone();
         } else {
             unreachable!();
         }
@@ -1279,8 +1277,8 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
             idx,
             attempt_id,
             &action,
-            now.clone(),
-            now.clone(),
+            now,
+            now,
         );
         state = state.move_to_persistent(description.get_cache());
 
@@ -1305,11 +1303,11 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
 
             state = state.apply_action(
                 &mut description,
-                i as u32,
+                i,
                 attempt_id,
                 &action,
-                now.clone(),
-                now.clone(),
+                now,
+                now,
             );
             state = state.move_to_persistent(description.get_cache());
         }
@@ -1343,11 +1341,11 @@ fn test_state_hashes_part1(options: &SessionOptions, total_nodes: u32) {
 
             state = state.apply_action(
                 &mut description,
-                i as u32,
+                i,
                 attempt_id,
                 &action,
-                now.clone(),
-                now.clone(),
+                now,
+                now,
             );
             state = state.move_to_persistent(description.get_cache());
 
@@ -1373,39 +1371,39 @@ fn get_sign_string(signature: &BlockCandidateSignaturePtr) -> String {
         return "".to_string();
     }
 
-    match std::str::from_utf8(&signature.as_ref().unwrap().get_signature()) {
+    match std::str::from_utf8(signature.as_ref().unwrap().get_signature()) {
         Ok(s) => s.to_string(),
         _ => "Error".to_string(),
     }
 }
 
 fn test_state_hashes_part2(options: &SessionOptions, total_nodes: u32) {
-    let mut description = SessionDescriptionImpl::new(&options, total_nodes);
+    let mut description = SessionDescriptionImpl::new(options, total_nodes);
     let zero_hash = BlockHash::default();
     let now = std::time::SystemTime::now();
 
     let sig1 = SessionFactory::create_block_candidate_signature(
         &mut description,
-        vec!['a' as u8; 1]
+        vec![b'a'; 1]
     );
     let sig2 = SessionFactory::create_block_candidate_signature(
         &mut description,
-        vec!['b' as u8; 1]
+        vec![b'b'; 1]
     );
     let sig3 = SessionFactory::create_block_candidate_signature(
         &mut description,
-        vec!['c' as u8; 1]
+        vec![b'c'; 1]
     );
     let sig4 = SessionFactory::create_block_candidate_signature(
         &mut description,
-        vec!['d' as u8; 1]
+        vec![b'd'; 1]
     );
 
     {
         let m1 = sig1.merge(&sig2, &mut description);
-        assert!(m1.as_ref().unwrap().get_signature()[0] == 'a' as u8);
+        assert!(m1.as_ref().unwrap().get_signature()[0] == b'a');
         let m2 = sig2.merge(&sig1, &mut description);
-        assert!(m2.as_ref().unwrap().get_signature()[0] == 'a' as u8);
+        assert!(m2.as_ref().unwrap().get_signature()[0] == b'a');
     }
 
     let sig_vec_null: Vec<BlockCandidateSignaturePtr> =
@@ -1430,14 +1428,14 @@ fn test_state_hashes_part2(options: &SessionOptions, total_nodes: u32) {
         assert!(get_sign_string(m1.at(0)) == "a");
         assert!(get_sign_string(m1.at(1)) == "b");
         assert!(get_sign_string(m1.at(2)) == "d");
-        assert!(get_sign_string(m1.at(3)) == "");
+        assert!(get_sign_string(m1.at(3)).is_empty());
 
         let m2 = sig_vec2.merge(&sig_vec1, &mut description);
 
         assert!(get_sign_string(m2.at(0)) == "a");
         assert!(get_sign_string(m2.at(1)) == "b");
         assert!(get_sign_string(m2.at(2)) == "d");
-        assert!(get_sign_string(m2.at(3)) == "");
+        assert!(get_sign_string(m2.at(3)).is_empty());
 
         assert!(m1.get_hash() == 3697200380 && m2.get_hash() == 3697200380);
     }
@@ -1448,8 +1446,8 @@ fn test_state_hashes_part2(options: &SessionOptions, total_nodes: u32) {
         zero_hash.clone(),
         zero_hash.clone(),
         zero_hash.clone(),
-        now.clone(),
-        now.clone(),
+        now,
+        now,
     );
     let cand1 =
         SessionFactory::create_block_candidate(&mut description, sentb.clone(), sig_vec1.clone());
@@ -1465,7 +1463,7 @@ fn test_state_hashes_part2(options: &SessionOptions, total_nodes: u32) {
         assert!(get_sign_string(m1.get_approvers_list().at(0)) == "a");
         assert!(get_sign_string(m1.get_approvers_list().at(1)) == "b");
         assert!(get_sign_string(m1.get_approvers_list().at(2)) == "d");
-        assert!(get_sign_string(m1.get_approvers_list().at(3)) == "");
+        assert!(get_sign_string(m1.get_approvers_list().at(3)).is_empty());
 
         let m2 = cand2.merge(&cand1, &mut description);
 
@@ -1473,7 +1471,7 @@ fn test_state_hashes_part2(options: &SessionOptions, total_nodes: u32) {
         assert!(get_sign_string(m2.get_approvers_list().at(0)) == "a");
         assert!(get_sign_string(m2.get_approvers_list().at(1)) == "b");
         assert!(get_sign_string(m2.get_approvers_list().at(2)) == "d");
-        assert!(get_sign_string(m2.get_approvers_list().at(3)) == "");
+        assert!(get_sign_string(m2.get_approvers_list().at(3)).is_empty());
 
         assert!(m1.get_hash() == 3910441588 && m2.get_hash() == 3910441588);
     }

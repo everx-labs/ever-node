@@ -95,8 +95,8 @@ impl BlockResult {
     }
 
     /// Any result 
-    pub fn to_any(self) -> Arc<BlockHandle> {
-        self.handle
+    pub fn to_any(&self) -> Arc<BlockHandle> {
+        self.handle.clone()
     }
 
     /// Assert creation
@@ -108,35 +108,32 @@ impl BlockResult {
     }
 
     /// Assert non-creation
-    pub fn to_non_created(self) -> Option<Arc<BlockHandle>> {
+    pub fn to_non_created(&self) -> Option<Arc<BlockHandle>> {
         match self.status {
             DataStatus::Created => None,
-            _ => Some(self.handle)
+            _ => Some(self.handle.clone())
         }
     }
 
     /// Assert non-update
-    pub fn to_non_updated(self) -> Option<Arc<BlockHandle>> {
+    pub fn to_non_updated(&self) -> Option<Arc<BlockHandle>> {
         match self.status {
             DataStatus::Updated => None,
-            _ => Some(self.handle)
+            _ => Some(self.handle.clone())
         }
     }
 
     /// Assert update
-    pub fn to_updated(self) -> Option<Arc<BlockHandle>> {
+    pub fn to_updated(&self) -> Option<Arc<BlockHandle>> {
         match self.status {
-            DataStatus::Updated => Some(self.handle),
+            DataStatus::Updated => Some(self.handle.clone()),
             _ => None
         }
     }
 
     /// Check update
     pub fn _is_updated(&self) -> bool {
-        match self.status {
-            DataStatus::Updated => true,
-            _ => false
-        }
+        matches!(self.status, DataStatus::Updated)
     }
 
 }
@@ -207,6 +204,7 @@ pub struct InternalDb {
 #[allow(dead_code)]
 impl InternalDb {
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn with_update(
         config: InternalDbConfig,
         restore_db_enabled: bool,
@@ -426,6 +424,7 @@ impl InternalDb {
         Ok(Some(ret))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn store_block_linkage(
         &self, 
         handle: &Arc<BlockHandle>, 
@@ -696,13 +695,11 @@ impl InternalDb {
                     result = BlockResult::with_status(handle.clone(), DataStatus::Updated)
                 }
             }
-        } else {
-            if !handle.has_proof() {
-                self.mesh_key_block_proofs_db.put(id, proof.data())?;
-                if handle.set_proof() {
-                    self.store_block_handle(&handle, callback)?;
-                    result = BlockResult::with_status(handle.clone(), DataStatus::Updated)
-                }
+        } else if !handle.has_proof() {
+            self.mesh_key_block_proofs_db.put(id, proof.data())?;
+            if handle.set_proof() {
+                self.store_block_handle(&handle, callback)?;
+                result = BlockResult::with_status(handle.clone(), DataStatus::Updated)
             }
         }
         Ok(result)
@@ -767,7 +764,7 @@ impl InternalDb {
             if handle.set_state() {
                 self.store_block_handle(handle, callback_handle)?;
             }
-            return Ok((state.clone(), true))
+            Ok((state.clone(), true))
         } else {
             Ok((self.load_shard_state_dynamic(handle.id())?, false))
         }
@@ -945,7 +942,7 @@ impl InternalDb {
         calc_ttl: impl Fn(u32) -> (u32, bool),
         zerostate_id: &BlockIdExt,
     ) -> Result<()> {
-        let _tc = TimeChecker::new(format!("shard_state_persistent_gc"), 5000);
+        let _tc = TimeChecker::new("shard_state_persistent_gc".to_string(), 5000);
         let mut for_delete = HashSet::new();
         self.shard_state_persistent_db.for_each_key(&mut |key| {
 
@@ -1078,7 +1075,7 @@ impl InternalDb {
     ) -> Result<bool> {
         let _tc = TimeChecker::new(format!("store_block_applied {}", handle.id()), 30);
         if handle.set_block_applied() {
-            self.store_block_handle(&handle, callback)?;
+            self.store_block_handle(handle, callback)?;
             Ok(true)
         } else {
             Ok(false)
@@ -1207,12 +1204,12 @@ impl InternalDb {
     }
 
     pub fn load_all_top_shard_blocks(&self) -> Result<HashMap<TopBlockDescrId, TopBlockDescrStuff>> {
-        let _tc = TimeChecker::new(format!("load_all_top_shard_blocks"), 100);
+        let _tc = TimeChecker::new("load_all_top_shard_blocks".to_string(), 100);
         let mut result = HashMap::<TopBlockDescrId, TopBlockDescrStuff>::new();
 
         let mut invalid_entries = Vec::new();
         self.shard_top_blocks_db.for_each(&mut |id_bytes, tsb_bytes| {
-            let id = TopBlockDescrId::from_bytes(&id_bytes);
+            let id = TopBlockDescrId::from_bytes(id_bytes);
             let tbds = TopBlockDescrStuff::from_bytes(tsb_bytes, false);
 
             match &id {
@@ -1241,10 +1238,10 @@ impl InternalDb {
 
     #[cfg(test)]
     pub fn load_all_top_shard_blocks_raw(&self) -> Result<HashMap<TopBlockDescrId, Vec<u8>>> {
-        let _tc = TimeChecker::new(format!("load_all_top_shard_blocks_raw"), 100);
+        let _tc = TimeChecker::new("load_all_top_shard_blocks_raw".to_string(), 100);
         let mut result = HashMap::<TopBlockDescrId, Vec<u8>>::new();
         self.shard_top_blocks_db.for_each(&mut |id_bytes, tsb_bytes| {
-            let id = TopBlockDescrId::from_bytes(&id_bytes)?;
+            let id = TopBlockDescrId::from_bytes(id_bytes)?;
             result.insert(id, tsb_bytes.to_vec());
             Ok(true)
         })?;
@@ -1303,11 +1300,9 @@ impl InternalDb {
                 clear_dbs(self, id);
             } else {
                 for tb in &top_blocks {
-                    if id.shard().intersect_with(tb.shard()) {
-                        if id.seq_no() > tb.seq_no() {
-                            clear_dbs(self, id);
-                            break;
-                        }
+                    if id.shard().intersect_with(tb.shard()) && id.seq_no() > tb.seq_no() {
+                        clear_dbs(self, id);
+                        break;
                     }
                 }
             }
@@ -1316,11 +1311,9 @@ impl InternalDb {
         self.next2_block_db.for_each(&mut |_key, val| {
             let id = BlockIdExt::deserialize(&mut Cursor::new(&val))?;
             for tb in &top_blocks {
-                if id.shard().intersect_with(tb.shard()) {
-                    if id.seq_no() > tb.seq_no() {
-                        clear_dbs(self, id);
-                        break;
-                    }
+                if id.shard().intersect_with(tb.shard()) && id.seq_no() > tb.seq_no() {
+                    clear_dbs(self, id);
+                    break;
                 }
             }
             Ok(true)
@@ -1339,14 +1332,14 @@ impl InternalDb {
 
         clear_last_handle(self, &prev_id);
         for id in &top_blocks {
-            clear_last_handle(self, &id);
+            clear_last_handle(self, id);
         }
 
         Ok(())
     }
 
     pub fn reset_unapplied_handles(&self) -> Result<()> {
-        let _tc = TimeChecker::new(format!("reset_unapplied_handles"), 1000);
+        let _tc = TimeChecker::new("reset_unapplied_handles".to_string(), 1000);
         self.block_handle_storage.for_each_keys(&mut |id| {
             if let Ok(Some(handle)) = self.load_block_handle(&id) {
                 if !handle.is_applied() {
@@ -1368,7 +1361,7 @@ impl InternalDb {
 
     pub fn migrate_handles_to_v5(&self) -> Result<()> {
         self.shard_state_dynamic_db.enumerate_ids(&mut |id| {
-            if let Ok(Some(handle)) = self.load_block_handle(&id) {
+            if let Ok(Some(handle)) = self.load_block_handle(id) {
                 handle.set_state_saved();
                 if let Err(e) = self.store_block_handle(&handle, None) {
                     log::error!("migrate_handles_to_v5: failed to store handle for {}: {}", id, e);
@@ -1405,7 +1398,7 @@ impl InternalDb {
             }
             Ok(true)
         })?;
-        res.sort_by(|a, b| a.seq_no().cmp(&b.seq_no()));
+        res.sort_by_key(|a| a.seq_no());
         Ok(res)
     }
     // return next block after merge
@@ -1423,7 +1416,7 @@ impl InternalDb {
             }
             Ok(true)
         })?;
-        res.sort_by(|a, b| a.seq_no().cmp(&b.seq_no()));
+        res.sort_by_key(|a| a.seq_no());
         Ok(res)
     }
 }

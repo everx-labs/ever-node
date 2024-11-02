@@ -196,7 +196,7 @@ impl RempMasterblockObserver {
 
     pub async fn process_master_block_handle(&self, mc_handle: &BlockHandle) -> Result<()> {
         if mc_handle.id().seq_no() != 0 {
-            let mc_blockstuff = self.engine.load_block(&mc_handle).await?;
+            let mc_blockstuff = self.engine.load_block(mc_handle).await?;
             let master_cc_seqno = mc_blockstuff.block()?.read_info()?.gen_catchain_seqno();
             self.queue_sender.send((mc_blockstuff, master_cc_seqno))?;
         }
@@ -226,10 +226,10 @@ impl RempMasterblockObserver {
 }
 
 /// Returns first non-processed block before `start`, but after `target_mc`
-pub async fn check_history_up_to_cc(engine: Arc<dyn EngineOperations>, message_cache: Arc<MessageCache>, start: &Vec<BlockIdExt>, target_cc: u32)
+pub async fn check_history_up_to_cc(engine: Arc<dyn EngineOperations>, message_cache: Arc<MessageCache>, start: &[BlockIdExt], target_cc: u32)
     -> Result<Option<BlockIdExt>>
 {
-    let mut blocks_to_process = start.clone();
+    let mut blocks_to_process = start.to_vec();
     let target_blocks = if target_cc > 0 {
         message_cache.get_inf_shards(target_cc)?
     }
@@ -255,7 +255,7 @@ pub async fn check_history_up_to_cc(engine: Arc<dyn EngineOperations>, message_c
         }
     }
 
-    return Ok(None);
+    Ok(None)
 }
 
 async fn get_block_cc_seqno(engine: Arc<dyn EngineOperations>, blk: &BlockIdExt) -> Result<u32> {
@@ -265,7 +265,7 @@ async fn get_block_cc_seqno(engine: Arc<dyn EngineOperations>, blk: &BlockIdExt)
     Ok(block_info.gen_catchain_seqno())
 }
 
-pub async fn find_previous_sessions(engine: Arc<dyn EngineOperations>, session_cache: &SessionValidatorsCache, prev: &Vec<BlockIdExt>, curr_cc_seqno: u32, curr_shard: &ShardIdent)
+pub async fn find_previous_sessions(engine: Arc<dyn EngineOperations>, session_cache: &SessionValidatorsCache, prev: &[BlockIdExt], curr_cc_seqno: u32, curr_shard: &ShardIdent)
     -> Result<Arc<SessionValidatorsList>>
 {
     if let Some(prev_list) = session_cache.get_prev_list (curr_shard, curr_cc_seqno) {
@@ -273,7 +273,7 @@ pub async fn find_previous_sessions(engine: Arc<dyn EngineOperations>, session_c
     }
 
     let mut prevs: HashSet<(ShardIdent, u32)> = HashSet::new();
-    let mut to_process = prev.clone();
+    let mut to_process = prev.to_vec();
     while let Some(blk) = to_process.pop() {
         let cc_seqno = get_block_cc_seqno(engine.clone(), &blk).await?;
         log::trace!(target: "remp", "Computing prev blocks for [{:?}] cc_seqno {}: block {}, cc_seqno {}", prev, curr_cc_seqno, blk, cc_seqno);
@@ -283,16 +283,14 @@ pub async fn find_previous_sessions(engine: Arc<dyn EngineOperations>, session_c
                 to_process.push(prev2);
             }
         }
-        else {
-            if let Some((old_shard, old_cc_seqno)) = prevs.replace((blk.shard().clone(), cc_seqno)) {
-                fail!("Computing prev blocks for [{:?}], cc_seqno {}, shard {}; history is inconsistent: references {}/{} and {}/{}",
-                    prev, curr_cc_seqno, curr_shard, old_shard, old_cc_seqno, blk.shard(), cc_seqno
-                )
-            }
+        else if let Some((old_shard, old_cc_seqno)) = prevs.replace((blk.shard().clone(), cc_seqno)) {
+            fail!("Computing prev blocks for [{:?}], cc_seqno {}, shard {}; history is inconsistent: references {}/{} and {}/{}",
+                prev, curr_cc_seqno, curr_shard, old_shard, old_cc_seqno, blk.shard(), cc_seqno
+            )
         }
     };
 
-    let mut res: SessionValidatorsList = SessionValidatorsList::new();
+    let mut res = SessionValidatorsList::new();
 
     for (shard,cc_seqno) in prevs.iter() {
         let session = session_cache.get_info(shard,*cc_seqno)
@@ -308,7 +306,7 @@ pub async fn find_previous_sessions(engine: Arc<dyn EngineOperations>, session_c
 
     if let Some(max_cc_seqno) = prev_list.get_maximal_cc_seqno() {
         if max_cc_seqno != curr_cc_seqno - 1 {
-            session_cache.add_prev_list (curr_shard, curr_cc_seqno, Arc::new(SessionValidatorsList::new()))?;
+            session_cache.add_prev_list (curr_shard, curr_cc_seqno, Default::default())?;
             fail!("Computing prev session for shard {} cc_seqno {} by prev blocks [{:?}]: unexpected diff {} != {} - 1",
                 curr_shard, curr_cc_seqno, prev, max_cc_seqno, curr_cc_seqno
             )

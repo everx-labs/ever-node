@@ -68,16 +68,13 @@ impl RoundAttemptState for RoundAttemptStateImpl {
     */
 
     fn get_voted_block(&self, desc: &dyn SessionDescription) -> Option<SentBlockPtr> {
-        if self.votes.is_none() {
-            return None;
-        }
-
-        for vote in self.votes.get_iter() {
-            if vote.check_block_is_voted(desc) {
-                return Some(vote.get_block().clone());
+        if let Some(votes) = self.votes.as_ref() {
+            for vote in votes.get_iter() {
+                if vote.check_block_is_voted(desc) {
+                    return Some(vote.get_block().clone());
+                }
             }
         }
-
         None
     }
 
@@ -86,16 +83,13 @@ impl RoundAttemptState for RoundAttemptStateImpl {
     }
 
     fn check_vote_received_from(&self, src_idx: u32) -> bool {
-        if self.votes.is_none() {
-            return false;
-        }
-
-        for vote in self.votes.get_iter() {
-            if vote.check_block_is_voted_by(src_idx) {
-                return true;
+        if let Some(votes) = self.votes.as_ref() {
+            for vote in votes.get_iter() {
+                if vote.check_block_is_voted_by(src_idx) {
+                    return true;
+                }
             }
         }
-
         false
     }
 
@@ -160,7 +154,7 @@ impl RoundAttemptState for RoundAttemptStateImpl {
                     ton::message::Vote {
                         round: round.get_sequence_number() as ton::int,
                         attempt: self.sequence_number as ton::int,
-                        candidate: block_to_vote_id.clone().into(),
+                        candidate: block_to_vote_id.clone(),
                     }
                     .into_boxed(),
                 );
@@ -184,7 +178,7 @@ impl RoundAttemptState for RoundAttemptStateImpl {
                     ton::message::Precommit {
                         round: round.get_sequence_number() as ton::int,
                         attempt: self.sequence_number as ton::int,
-                        candidate: voted_block_id.clone().into(),
+                        candidate: voted_block_id.clone(),
                     }
                     .into_boxed(),
                 );
@@ -254,9 +248,7 @@ impl RoundAttemptState for RoundAttemptStateImpl {
         let total_nodes_count = desc.get_total_nodes();
 
         if let Some(ref votes) = self.votes {
-            let mut votes_map: Vec<(ValidatorWeight, String)> = Vec::new();
-
-            votes_map.reserve(votes.len());
+            let mut votes_map: Vec<(ValidatorWeight, String)> = Vec::with_capacity(votes.len());
 
             for vote_candidate in votes.get_iter() {
                 let mut votes_weight: ValidatorWeight = 0;
@@ -267,7 +259,7 @@ impl RoundAttemptState for RoundAttemptStateImpl {
                     if voters.at(i as usize) {
                         votes_weight += desc.get_node_weight(i);
 
-                        if vote_dump != "" {
+                        if !vote_dump.is_empty() {
                             vote_dump = format!("{}, ", vote_dump);
                         }
 
@@ -304,15 +296,7 @@ impl RoundAttemptState for RoundAttemptStateImpl {
 
             //sort votes in a reverse order
 
-            votes_map.sort_by(|a, b| {
-                if a.0 > b.0 {
-                    std::cmp::Ordering::Less
-                } else if a.0 < b.0 {
-                    std::cmp::Ordering::Greater
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            });
+            votes_map.sort_by(|(a, _), (b, _)| b.cmp(a));
 
             result = format!(
                 "{}        - votes ({} candidates):\n",
@@ -339,7 +323,7 @@ impl RoundAttemptState for RoundAttemptStateImpl {
 
             precommitted_weight += desc.get_node_weight(i);
 
-            if precomitters != "" {
+            if !precomitters.is_empty() {
                 precomitters = format!("{}, ", precomitters);
             }
 
@@ -436,9 +420,7 @@ impl Merge<PoolPtr<dyn RoundAttemptState>> for PoolPtr<dyn RoundAttemptState> {
         let vote_for = {
             if left.vote_for.is_none() {
                 right.vote_for.clone()
-            } else if right.vote_for.is_none() {
-                left.vote_for.clone()
-            } else if left.vote_for == right.vote_for {
+            } else if right.vote_for.is_none() || left.vote_for == right.vote_for {
                 left.vote_for.clone()
             } else {
                 let left_block_id = left.vote_for.as_ref().unwrap().get_id();
@@ -509,8 +491,8 @@ impl std::cmp::PartialEq for dyn RoundAttemptState {
 impl CacheObject<RoundAttemptStateImpl> for RoundAttemptStateImpl {
     fn compare(&self, value: &Self) -> bool {
         self.sequence_number == value.sequence_number
-            && &self.votes == &value.votes
-            && &self.precommitted == &value.precommitted
+            && self.votes == value.votes
+            && self.precommitted.eq(&value.precommitted)
             && self.vote_for == value.vote_for
             && self.hash == value.hash
     }
@@ -591,7 +573,7 @@ impl RoundAttemptStateImpl {
 
         log::trace!("...dispatching incoming attempt message");
 
-        let new_attempt_state = match message {
+        match message {
             ton::Message::ValidatorSession_Message_VoteFor(message) => self.apply_vote_for_action(
                 desc,
                 src_idx,
@@ -642,9 +624,7 @@ impl RoundAttemptStateImpl {
                     message
                 );
             }
-        };
-
-        new_attempt_state
+        }
     }
 
     fn apply_vote_for_action(
@@ -711,7 +691,7 @@ impl RoundAttemptStateImpl {
 
         //check the vote-for block-candidate
 
-        let candidate_id: BlockId = message.candidate.clone().into();
+        let candidate_id: BlockId = message.candidate.clone();
         let vote_for_block = round_state.get_block(&candidate_id);
 
         if vote_for_block.is_none()
@@ -852,7 +832,7 @@ impl RoundAttemptStateImpl {
         if let Some(message) = message {
             match message {
                 ton::Message::ValidatorSession_Message_Vote(message) => {
-                    let candidate_id: BlockId = message.candidate.clone().into();
+                    let candidate_id: BlockId = message.candidate.clone();
                     if &candidate_id != block_to_vote_id {
                         log::warn!(
                             "Node {} sent an invalid message (expected VOTE({:?})): {:?}",
@@ -950,7 +930,7 @@ impl RoundAttemptStateImpl {
         if let Some(message) = message {
             match message {
                 ton::Message::ValidatorSession_Message_Precommit(message) => {
-                    let candidate_id: BlockId = message.candidate.clone().into();
+                    let candidate_id: BlockId = message.candidate.clone();
                     if &candidate_id != voted_block_id {
                         log::warn!(
                             "Node {} sent an invalid message (expected PRECOMMIT({:?})): {:?}",
@@ -1010,14 +990,8 @@ impl RoundAttemptStateImpl {
                 seqno: sequence_number as ton::int,
                 votes: votes.get_ton_hash(),
                 precommitted: precommitted.get_ton_hash(),
-                vote_for: match vote_for {
-                    Some(_) => true,
-                    None => false,
-                } as ton::int,
-                vote_for_inited: match vote_for {
-                    Some(Some(_)) => true,
-                    _ => false,
-                } as ton::int,
+                vote_for: vote_for.is_some() as ton::int,
+                vote_for_inited: matches!(vote_for, Some(Some(_))) as ton::int,
             })
         } else {
             crate::utils::compute_hash(ton::hashable::ValidatorSessionRoundAttempt {
@@ -1040,11 +1014,11 @@ impl RoundAttemptStateImpl {
     ) -> Self {
         Self {
             pool: SessionPool::Temp,
-            sequence_number: sequence_number,
-            votes: votes,
-            precommitted: precommitted,
-            vote_for: vote_for,
-            hash: hash,
+            sequence_number,
+            votes,
+            precommitted,
+            vote_for,
+            hash,
             instance_counter: instance_counter.clone(),
         }
     }

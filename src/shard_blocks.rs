@@ -113,7 +113,7 @@ impl ShardBlocksPool {
             } else {
                 TopBlockDescr::construct_from_bytes(&data)?
             };
-            Ok(Arc::new(TopBlockDescrStuff::new(tbd, &id, self.is_fake, own)?))
+            Ok(Arc::new(TopBlockDescrStuff::new(tbd, id, self.is_fake, own)?))
         };
         self.process_shard_block(id, cc_seqno, factory, check_only, engine).await
     }
@@ -148,7 +148,7 @@ impl ShardBlocksPool {
                 tbds
             } else {
                 let ret = factory()?;
-                tbds.get_or_insert_with(|| ret) 
+                tbds.get_or_insert(ret) 
             };
 
             if !self.is_fake {
@@ -312,7 +312,7 @@ pub fn resend_top_shard_blocks_worker(engine: Arc<dyn EngineOperations>) {
                 break
             }
             // 2..3 seconds
-            let delay = rand::thread_rng().gen_range(2000, 3000);
+            let delay = rand::thread_rng().gen_range(2000..3000);
             futures_timer::Delay::new(Duration::from_millis(delay)).await;
             match resend_top_shard_blocks(engine.deref()).await {
                 Ok(_) => log::trace!("resend_top_shard_blocks: ok"),

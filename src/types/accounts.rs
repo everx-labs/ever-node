@@ -154,7 +154,7 @@ impl ShardAccountStuff {
             libraries.set(&key, &lib_descr)?;
         }
 
-        return Ok(())
+        Ok(())
     }
     pub fn add_public_library(
         &self, 
@@ -187,6 +187,6 @@ impl ShardAccountStuff {
 
         libraries.set(&key, &lib_descr)?;
 
-        return Ok(());
+        Ok(())
       }
 }

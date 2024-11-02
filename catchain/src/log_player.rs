@@ -79,7 +79,7 @@ struct LogHeader {
 
 impl LogHeader {
     fn get_session(&mut self, session_id: &SessionId) -> Option<&mut SessionDesc> {
-        if let Some(index) = self.session_index.get(&session_id) {
+        if let Some(index) = self.session_index.get(session_id) {
             return Some(&mut self.session_descs[*index]);
         }
 
@@ -187,7 +187,7 @@ impl LogHeader {
                 session_desc.local_key = Some(local_key.clone());
 
                 for node_desc in session_desc.node_ids.iter_mut() {
-                    if &node_desc.public_key.id() == &local_id {
+                    if node_desc.public_key.id() == local_id {
                         log::trace!("...resolve private key for {}", node_desc.public_key.id());
                         node_desc.public_key = local_key.clone();
                     }
@@ -235,7 +235,7 @@ impl CatchainOverlayManager for LogPlayerOverlayManager {
         &self,
         local_id: &PublicKeyHash,
         overlay_short_id: &Arc<PrivateOverlayShortId>,
-        nodes: &Vec<CatchainNode>,
+        nodes: &[CatchainNode],
         listener: CatchainOverlayListenerPtr,
         overlay_log_replay_listener: CatchainOverlayLogReplayListenerPtr,
     ) -> Result<CatchainOverlayPtr> {
@@ -303,17 +303,17 @@ impl CatchainOverlayManager for LogPlayerOverlayManager {
 impl LogPlayerOverlayManager {
     fn create(
         session_id: &SessionId,
-        node_ids: &Vec<CatchainNode>,
+        node_ids: &[CatchainNode],
         log_replay_options: &LogReplayOptions,
         initial_timestamp: &SystemTime,
         replay_listener: CatchainReplayListenerPtr,
     ) -> Self {
         Self {
             session_id: session_id.clone(),
-            node_ids: node_ids.clone(),
+            node_ids: node_ids.to_vec(),
             log_replay_options: log_replay_options.clone(),
-            initial_timestamp: initial_timestamp.clone(),
-            replay_listener: replay_listener,
+            initial_timestamp: *initial_timestamp,
+            replay_listener,
         }
     }
 }
@@ -345,7 +345,7 @@ impl LogPlayer for LogPlayerImpl {
         &self.local_key
     }
 
-    fn get_nodes(&self) -> &Vec<CatchainNode> {
+    fn get_nodes(&self) -> &[CatchainNode] {
         &self.node_ids
     }
 
@@ -424,7 +424,7 @@ impl LogPlayerImpl {
         Parser
     */
 
-    fn parse(path: &String, formats: &[Format], stop_flag: &Arc<AtomicBool>) -> Result<()> {
+    fn parse(path: &str, formats: &[Format], stop_flag: &Arc<AtomicBool>) -> Result<()> {
         //open file
 
         let file = File::open(path)?;
@@ -471,7 +471,7 @@ impl LogPlayerImpl {
     fn parse_body(
         replay_options: &LogReplayOptions,
         session_id: &SessionId,
-        _node_ids: &Vec<CatchainNode>,
+        _node_ids: &[CatchainNode],
         stop_flag: &Arc<AtomicBool>,
         listener: CatchainOverlayListenerPtr,
         replay_listener: CatchainOverlayLogReplayListenerPtr,
@@ -495,11 +495,11 @@ impl LogPlayerImpl {
         let parse_data = Rc::new(move |message_type, captures: &regex::Captures| {
             let data_size: u32 = captures.get(1).unwrap().as_str().parse().unwrap();
             let data = &captures.get(2).unwrap().as_str();
-            let bytes = utils::parse_hex(&data);
+            let bytes = utils::parse_hex(data);
             let source_id = &captures.get(3).unwrap().as_str();
-            let source_id = utils::parse_hex_as_public_key_hash(&source_id);
+            let source_id = utils::parse_hex_as_public_key_hash(source_id);
             let block_session_id = &captures.get(4).unwrap().as_str();
-            let block_session_id = utils::parse_hex_as_session_id(&block_session_id);
+            let block_session_id = utils::parse_hex_as_session_id(block_session_id);
             let timestamp: u64 = captures.get(5).unwrap().as_str().parse().unwrap();
             let mut start_timestamp = start_timestamp.borrow_mut();
 
@@ -618,7 +618,7 @@ impl LogPlayerImpl {
     }
 
     fn parse_header(
-        path: &String,
+        path: &str,
         stop_flag: &Arc<AtomicBool>,
         terminate_on_body: bool,
     ) -> Result<LogHeader> {
@@ -662,13 +662,13 @@ impl LogPlayerImpl {
                 r".* Create validator session ([0-9a-fA-F]+) for local ID ([0-9a-fA-F]+) and key ([0-9a-fA-F]+) .*timestamp=([0-9]+)",
                 move |captures: &regex::Captures| {
                     let session_id = utils::parse_hex_as_session_id(
-                        &captures.get(1).unwrap().as_str()
+                        captures.get(1).unwrap().as_str()
                     );
                     let local_id = utils::parse_hex_as_public_key_hash(
-                        &captures.get(2).unwrap().as_str()
+                        captures.get(2).unwrap().as_str()
                     );
                     let local_key = utils::parse_hex_as_expanded_private_key(
-                        &captures.get(3).unwrap().as_str().trim(),
+                        captures.get(3).unwrap().as_str().trim(),
                     );
                     let timestamp: u64 = captures.get(4).unwrap().as_str().parse().unwrap();
                     let replay_time =
@@ -685,7 +685,7 @@ impl LogPlayerImpl {
                 r".* Validator session ([0-9a-fA-F]+) node: weight=([0-9]+), public_key=([0-9a-fA-F]+), adnl_id=([0-9a-fA-F]+) .*timestamp=([0-9]+)",
                 move |captures: &regex::Captures| {
                     let session_id = utils::parse_hex_as_session_id(
-                        &captures.get(1).unwrap().as_str()
+                        captures.get(1).unwrap().as_str()
                     );
                     let weight = captures
                         .get(2)
@@ -693,14 +693,14 @@ impl LogPlayerImpl {
                         .as_str()
                         .parse::<ValidatorWeight>()?;
                     let public_key = utils::parse_hex_as_public_key(
-                        &captures.get(3).unwrap().as_str()
+                        captures.get(3).unwrap().as_str()
                     );
                     let adnl_id = utils::parse_hex_as_public_key_hash(
-                        &captures.get(4).unwrap().as_str()
+                        captures.get(4).unwrap().as_str()
                     );
                     let catchain_node = CatchainNode {
-                        public_key: public_key,
-                        adnl_id: adnl_id,
+                        public_key,
+                        adnl_id,
                     };
 
                     add_node_clone(session_id, catchain_node, weight);
@@ -745,8 +745,8 @@ impl LogPlayerImpl {
                     let hex = &captures.get(4).unwrap().as_str();
                     let adnl_id = utils::parse_hex_as_public_key_hash(hex.trim());
                     let catchain_node = CatchainNode {
-                        public_key: public_key,
-                        adnl_id: adnl_id,
+                        public_key,
+                        adnl_id,
                     };
                     let weight = captures
                         .get(5)
@@ -809,7 +809,7 @@ impl LogPlayerImpl {
         let mut log_header =
             Self::parse_header(&log_replay_options.log_file_name, &stop_flag, true)?;
 
-        if log_header.session_descs.len() == 0 {
+        if log_header.session_descs.is_empty() {
             fail!(
                 "No sessions have been found in the log '{}'",
                 &log_replay_options.log_file_name
@@ -818,7 +818,7 @@ impl LogPlayerImpl {
 
         let preferred_session_id =
             if let Some(preferred_session_id) = &log_replay_options.session_id {
-                utils::parse_hex_as_session_id(&preferred_session_id)
+                utils::parse_hex_as_session_id(preferred_session_id)
             } else {
                 log_header.session_descs[log_header.session_descs.len() - 1]
                     .session_id
@@ -849,7 +849,7 @@ impl LogPlayerImpl {
             node_ids: session_desc.node_ids,
             weights: session_desc.weights,
             local_key: session_desc.local_key.unwrap().clone(),
-            local_id: local_id,
+            local_id,
             options: log_replay_options.clone(),
             initial_timestamp: session_desc.initial_timestamp,
         }))
@@ -868,20 +868,20 @@ impl LogPlayerImpl {
 
         let mut log_players = Vec::new();
 
-        if let Err(_) = log_header {
+        if log_header.is_err() {
             return log_players;
         }
 
         let log_header = log_header.unwrap();
 
-        if log_header.session_descs.len() == 0 {
+        if log_header.session_descs.is_empty() {
             return log_players;
         }
 
         for session_desc in log_header.session_descs {
             if session_desc.node_ids.len() != session_desc.weights.len()
                 || session_desc.local_key.is_none()
-                || !session_desc.local_key.as_ref().unwrap().pub_key().is_err()
+                || session_desc.local_key.as_ref().unwrap().pub_key().is_ok()
             {
                 continue;
             }
@@ -892,7 +892,7 @@ impl LogPlayerImpl {
                 node_ids: session_desc.node_ids,
                 weights: session_desc.weights,
                 local_key: session_desc.local_key.unwrap().clone(),
-                local_id: local_id,
+                local_id,
                 options: log_replay_options.clone(),
                 initial_timestamp: session_desc.initial_timestamp,
             });
@@ -914,7 +914,7 @@ impl LogPlayerImpl {
         Ok(CatchainFactory::create_catchain(
             options,
             player.get_session_id(),
-            player.get_nodes(),
+            player.get_nodes().to_vec(),
             player.get_local_key(),
             log_replay_options.db_path.clone(),
             log_replay_options.db_suffix.clone(),
@@ -1041,7 +1041,7 @@ impl OverlayImpl {
         is_stopped_flag: Arc<AtomicBool>,
         _local_id: &PublicKeyHash,
         _overlay_short_id: &Arc<PrivateOverlayShortId>,
-        _nodes: &Vec<CatchainNode>,
+        _nodes: &[CatchainNode],
         listener: CatchainOverlayListenerPtr,
     ) -> Arc<OverlayImpl> {
         Arc::new(Self::new(should_stop_flag, is_stopped_flag, listener))
@@ -1053,9 +1053,9 @@ impl OverlayImpl {
         listener: CatchainOverlayListenerPtr,
     ) -> Self {
         Self {
-            listener: listener,
-            should_stop_flag: should_stop_flag,
-            is_stopped_flag: is_stopped_flag,
+            listener,
+            should_stop_flag,
+            is_stopped_flag,
         }
     }
 }

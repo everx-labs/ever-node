@@ -48,7 +48,7 @@ fn test_check_master_blocks_proof_shuffle() {
         let block = BlockStuff::read_block_from_file(&name).unwrap();
 
         let bytes = std::fs::read(
-            &format!("src/tests/static/test_master_block_proof_shuffle/proof__{}", seqno)
+            format!("src/tests/static/test_master_block_proof_shuffle/proof__{}", seqno)
         ).unwrap();
         let block_proof = BlockProofStuff::deserialize(block.id(), bytes, false).unwrap();
 

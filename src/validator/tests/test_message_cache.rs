@@ -46,7 +46,7 @@ impl SimpleCache {
                 res.push(id.clone());
             }
         }
-        return res;
+        res
     }
     pub fn get_statuses_for_uid(&self, message_uid: &UInt256) -> Vec<(UInt256, RempMessageStatus)> {
         let mut res = Vec::new();
@@ -55,7 +55,7 @@ impl SimpleCache {
                 res.push((id.clone(),status.clone()));
             }
         }
-        return res;
+        res
     }
     pub fn add_external_message_status(&mut self, new_id: &UInt256, new_uid: &UInt256, new_mseq: i32, new_status: &RempMessageStatus) {
         if let Some(pos) = self.messages.iter().position(|(i,_,_,_)| i == new_id) {
@@ -72,11 +72,11 @@ impl SimpleCache {
         if let Some((_id,uid,_,_)) = self.messages.iter().find(|(i,_,_,_)| i == id) {
             let mut prev_messages = self.get_messages_for_uid(uid);
             prev_messages.sort();
-            let mut status = if prev_messages.get(0) == Some(id) {
+            let mut status = if prev_messages.first() == Some(id) {
                 RempDuplicateStatus::Fresh(uid.clone())
             }
             else {
-                RempDuplicateStatus::Duplicate(BlockIdExt::default(), uid.clone(), prev_messages.get(0).unwrap().clone())
+                RempDuplicateStatus::Duplicate(BlockIdExt::default(), uid.clone(), prev_messages.first().unwrap().clone())
             };
 
             let prev_collations = self.get_statuses_for_uid(uid);
@@ -90,10 +90,10 @@ impl SimpleCache {
                 }
             }
 
-            return status;
+            status
         }
         else {
-            return RempDuplicateStatus::Absent;
+            RempDuplicateStatus::Absent
         }
     }
     pub fn get_message_status(&self, id: &UInt256) -> Option<RempMessageStatus> {
@@ -103,7 +103,7 @@ impl SimpleCache {
         self.messages.retain(|(_id,_uid,mseq,_status)| new_mseq-2 < *mseq);
     }
     pub fn all_messages_count(&self) -> usize {
-        return self.messages.len();
+        self.messages.len()
     }
 }
 
@@ -162,8 +162,8 @@ fn do_test_message_cache_add_remove(check_uids: bool) -> Result<()> {
 
             if start_new_seq {
                 let ms = master_seq as u32;
-                tb.cache.try_set_master_cc_start_time(ms as u32,ms.into(), vec!())?;
-                let range = tb.cache.update_master_cc_ranges(ms as u32, Duration::from_secs(1))?;
+                tb.cache.try_set_master_cc_start_time(ms,ms.into(), vec!())?;
+                let range = tb.cache.update_master_cc_ranges(ms, Duration::from_secs(1))?;
                 tb.cache.gc_old_messages(*range.start()).await;
             }
 
@@ -234,7 +234,7 @@ fn do_test_message_cache_uids_same_block() -> Result<()> {
     bodies.push(gen_random_body(0)?);
 
     tb.rt.block_on( async move {
-        let body = bodies.get(0).unwrap();
+        let body = bodies.first().unwrap();
         let mut msg1 = Arc::new(RmqMessage::make_test_message(body)?);
         let mut msg2 = Arc::new(RmqMessage::make_test_message(body)?);
         if msg1.message_id > msg2.message_id {
@@ -283,7 +283,7 @@ fn do_message_cache_simple_random_test() -> Result<()> {
     tb.rt.block_on( async move {
         for msg in 0..max_messages {
             let seq = msg / (max_messages / max_seqs) + 1;
-            let body_id = random_thread.gen_range(0, max_bodies);
+            let body_id = random_thread.gen_range(0..max_bodies);
             let body = bodies.get(body_id as usize).unwrap();
             let msg = Arc::new(RmqMessage::make_test_message(body)?);
             let status = if random_thread.gen_bool(0.3) {
@@ -381,7 +381,7 @@ pub fn test_message_cache_cc_ranges_and_gc() -> Result<()> {
     tb.rt.block_on( async move {
         let msg = Arc::new(RmqMessage::make_test_message(&gen_random_body(100)?)?);
 
-        tb.cache.try_set_master_cc_start_time(1 as u32,1.into(), vec!())?;
+        tb.cache.try_set_master_cc_start_time(1_u32,1.into(), vec!())?;
         let _range = tb.cache.update_master_cc_ranges(1, Duration::from_secs(1))?;
 
         tb.cache.add_external_message_status(
@@ -393,13 +393,13 @@ pub fn test_message_cache_cc_ranges_and_gc() -> Result<()> {
             1
         )?;
 
-        tb.cache.try_set_master_cc_start_time(2 as u32,2.into(), vec!())?;
+        tb.cache.try_set_master_cc_start_time(2_u32,2.into(), vec!())?;
         let range = tb.cache.update_master_cc_ranges(2, Duration::from_secs(1))?;
 
         assert!(tb.cache.get_message_with_origin_status_cc(&msg.message_id)?.is_some());
         tb.cache.gc_old_messages(*range.start()).await;
 
-        tb.cache.try_set_master_cc_start_time(3 as u32,3.into(), vec!())?;
+        tb.cache.try_set_master_cc_start_time(3_u32,3.into(), vec!())?;
         let range = tb.cache.update_master_cc_ranges(3, Duration::from_secs(1))?;
         assert!(tb.cache.get_message_with_origin_status_cc(&msg.message_id)?.is_some());
 

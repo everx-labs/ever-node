@@ -44,7 +44,7 @@ fn ping(
 ) -> Result<()> {
 
     let global_cfg: TonNodeGlobalConfigJson = read_config(global_cfgfile, "global")?;
-    let zero_state_file_hash = global_cfg.zero_state()?.file_hash.as_slice().clone();
+    let zero_state_file_hash = *global_cfg.zero_state()?.file_hash.as_slice();
     let ip = IpAddress::from_versioned_string(ip_addr, None)?;
 
     let rt = tokio::runtime::Runtime::new()?;

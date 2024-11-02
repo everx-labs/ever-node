@@ -10,6 +10,7 @@
 * See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
+#![allow(clippy::too_many_arguments)]
 
 use crate::{
     Any, BlockPayloadPtr, CallbackTaskQueuePtr, CatchainNode, CatchainOverlayManagerPtr, 
@@ -96,7 +97,7 @@ where
 
     fn post_closure(&self, task: FuncPtr) {
         let task_desc = Box::new(TaskDesc::<FuncPtr> {
-            task: task,
+            task,
             creation_time: std::time::SystemTime::now(),
         });
         if let Err(send_error) = self.queue_sender.send(task_desc) {
@@ -179,11 +180,11 @@ where
             .register_counter(&format!("{}_queue.posts", name).into());
 
         Self {
-            name: name,
-            queue_sender: queue_sender,
-            queue_receiver: queue_receiver,
-            pull_counter: pull_counter,
-            post_counter: post_counter,
+            name,
+            queue_sender,
+            queue_receiver,
+            pull_counter,
+            post_counter,
             is_overloaded: Arc::new(AtomicBool::new(false)),
             linked_queue,
         }
@@ -262,7 +263,7 @@ impl CatchainListenerImpl {
 
     fn create(task_queue: TaskQueuePtr) -> ArcCatchainListenerPtr {
         Arc::new(Self {
-            task_queue: task_queue,
+            task_queue,
         })
     }
 }
@@ -363,7 +364,7 @@ impl CatchainOverlayManager for LoopbackOverlayManager {
         &self,
         _local_id: &PublicKeyHash,
         overlay_short_id: &Arc<PrivateOverlayShortId>,
-        _nodes: &Vec<CatchainNode>,
+        _nodes: &[CatchainNode],
         overlay_listener: CatchainOverlayListenerPtr,
         _log_replay_listener: CatchainOverlayLogReplayListenerPtr,
     ) -> Result<CatchainOverlayPtr> {
@@ -557,330 +558,330 @@ impl SessionImpl {
         let mut metrics_dumper = MetricsDumper::new();
 
         metrics_dumper
-            .add_compute_handler("sent_blocks.total".to_string(), &compute_instance_counter);
+            .add_compute_handler("sent_blocks.total", compute_instance_counter);
         metrics_dumper.add_compute_handler(
-            "block_candidates_signatures.total".to_string(),
-            &compute_instance_counter,
+            "block_candidates_signatures.total",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "block_candidates.total".to_string(),
-            &compute_instance_counter,
+            "block_candidates.total",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "vote_candidates.total".to_string(),
-            &compute_instance_counter,
+            "vote_candidates.total",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "round_attempts.total".to_string(),
-            &compute_instance_counter,
+            "round_attempts.total",
+            compute_instance_counter,
         );
-        metrics_dumper.add_compute_handler("rounds.total".to_string(), &compute_instance_counter);
+        metrics_dumper.add_compute_handler("rounds.total", compute_instance_counter);
         metrics_dumper
-            .add_compute_handler("old_rounds.total".to_string(), &compute_instance_counter);
+            .add_compute_handler("old_rounds.total", compute_instance_counter);
         metrics_dumper.add_compute_handler(
-            "session_states.total".to_string(),
-            &compute_instance_counter,
+            "session_states.total",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "integer_vectors.total".to_string(),
-            &compute_instance_counter,
+            "integer_vectors.total",
+            compute_instance_counter,
         );
         metrics_dumper
-            .add_compute_handler("bool_vectors.total".to_string(), &compute_instance_counter);
+            .add_compute_handler("bool_vectors.total", compute_instance_counter);
         metrics_dumper.add_compute_handler(
-            "block_candidate_vectors.total".to_string(),
-            &compute_instance_counter,
+            "block_candidate_vectors.total",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "block_candidate_signature_vectors.total".to_string(),
-            &compute_instance_counter,
+            "block_candidate_signature_vectors.total",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "vote_candidate_vectors.total".to_string(),
-            &compute_instance_counter,
+            "vote_candidate_vectors.total",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "round_attempt_vectors.total".to_string(),
-            &compute_instance_counter,
+            "round_attempt_vectors.total",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "old_round_vectors.total".to_string(),
-            &compute_instance_counter,
+            "old_round_vectors.total",
+            compute_instance_counter,
         );
-        metrics_dumper.add_derivative_metric("session_states.total".to_string());
-        metrics_dumper.add_derivative_metric("old_rounds.total".to_string());
-        metrics_dumper.add_derivative_metric("rounds.total".to_string());
-        metrics_dumper.add_derivative_metric("round_attempts.total".to_string());
-        metrics_dumper.add_derivative_metric("block_candidates.total".to_string());
-        metrics_dumper.add_derivative_metric("vote_candidates.total".to_string());
-        metrics_dumper.add_derivative_metric("block_candidates_signatures.total".to_string());
-        metrics_dumper.add_derivative_metric("sent_blocks.total".to_string());
-        metrics_dumper.add_derivative_metric("old_round_vectors.total".to_string());
-        metrics_dumper.add_derivative_metric("round_vectors.total".to_string());
-        metrics_dumper.add_derivative_metric("round_attempt_vectors.total".to_string());
-        metrics_dumper.add_derivative_metric("block_candidate_vectors.total".to_string());
-        metrics_dumper.add_derivative_metric("vote_candidate_vectors.total".to_string());
-        metrics_dumper.add_derivative_metric("block_candidate_signature_vectors.total".to_string());
-        metrics_dumper.add_derivative_metric("sent_block_vectors.total".to_string());
-        metrics_dumper.add_derivative_metric("bool_vectors.total".to_string());
-        metrics_dumper.add_derivative_metric("integer_vectors.total".to_string());
+        metrics_dumper.add_derivative_metric("session_states.total");
+        metrics_dumper.add_derivative_metric("old_rounds.total");
+        metrics_dumper.add_derivative_metric("rounds.total");
+        metrics_dumper.add_derivative_metric("round_attempts.total");
+        metrics_dumper.add_derivative_metric("block_candidates.total");
+        metrics_dumper.add_derivative_metric("vote_candidates.total");
+        metrics_dumper.add_derivative_metric("block_candidates_signatures.total");
+        metrics_dumper.add_derivative_metric("sent_blocks.total");
+        metrics_dumper.add_derivative_metric("old_round_vectors.total");
+        metrics_dumper.add_derivative_metric("round_vectors.total");
+        metrics_dumper.add_derivative_metric("round_attempt_vectors.total");
+        metrics_dumper.add_derivative_metric("block_candidate_vectors.total");
+        metrics_dumper.add_derivative_metric("vote_candidate_vectors.total");
+        metrics_dumper.add_derivative_metric("block_candidate_signature_vectors.total");
+        metrics_dumper.add_derivative_metric("sent_block_vectors.total");
+        metrics_dumper.add_derivative_metric("bool_vectors.total");
+        metrics_dumper.add_derivative_metric("integer_vectors.total");
 
         metrics_dumper.add_compute_handler(
-            "sent_blocks.persistent".to_string(),
-            &compute_instance_counter,
+            "sent_blocks.persistent",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "block_candidates_signatures.persistent".to_string(),
-            &compute_instance_counter,
+            "block_candidates_signatures.persistent",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "block_candidates.persistent".to_string(),
-            &compute_instance_counter,
+            "block_candidates.persistent",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "vote_candidates.persistent".to_string(),
-            &compute_instance_counter,
+            "vote_candidates.persistent",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "round_attempts.persistent".to_string(),
-            &compute_instance_counter,
+            "round_attempts.persistent",
+            compute_instance_counter,
         );
         metrics_dumper
-            .add_compute_handler("rounds.persistent".to_string(), &compute_instance_counter);
+            .add_compute_handler("rounds.persistent", compute_instance_counter);
         metrics_dumper.add_compute_handler(
-            "old_rounds.persistent".to_string(),
-            &compute_instance_counter,
+            "old_rounds.persistent",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "session_states.persistent".to_string(),
-            &compute_instance_counter,
+            "session_states.persistent",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "integer_vectors.persistent".to_string(),
-            &compute_instance_counter,
+            "integer_vectors.persistent",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "bool_vectors.persistent".to_string(),
-            &compute_instance_counter,
+            "bool_vectors.persistent",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "block_candidate_vectors.persistent".to_string(),
-            &compute_instance_counter,
+            "block_candidate_vectors.persistent",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "block_candidate_signature_vectors.persistent".to_string(),
-            &compute_instance_counter,
+            "block_candidate_signature_vectors.persistent",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "vote_candidate_vectors.persistent".to_string(),
-            &compute_instance_counter,
+            "vote_candidate_vectors.persistent",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "round_attempt_vectors.persistent".to_string(),
-            &compute_instance_counter,
+            "round_attempt_vectors.persistent",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "old_round_vectors.persistent".to_string(),
-            &compute_instance_counter,
+            "old_round_vectors.persistent",
+            compute_instance_counter,
         );
-        metrics_dumper.add_derivative_metric("session_states.persistent".to_string());
-        metrics_dumper.add_derivative_metric("old_rounds.persistent".to_string());
-        metrics_dumper.add_derivative_metric("rounds.persistent".to_string());
-        metrics_dumper.add_derivative_metric("round_attempts.persistent".to_string());
-        metrics_dumper.add_derivative_metric("block_candidates.persistent".to_string());
-        metrics_dumper.add_derivative_metric("vote_candidates.persistent".to_string());
-        metrics_dumper.add_derivative_metric("block_candidates_signatures.persistent".to_string());
-        metrics_dumper.add_derivative_metric("sent_blocks.persistent".to_string());
-        metrics_dumper.add_derivative_metric("old_round_vectors.persistent".to_string());
-        metrics_dumper.add_derivative_metric("round_vectors.persistent".to_string());
-        metrics_dumper.add_derivative_metric("round_attempt_vectors.persistent".to_string());
-        metrics_dumper.add_derivative_metric("block_candidate_vectors.persistent".to_string());
-        metrics_dumper.add_derivative_metric("vote_candidate_vectors.persistent".to_string());
+        metrics_dumper.add_derivative_metric("session_states.persistent");
+        metrics_dumper.add_derivative_metric("old_rounds.persistent");
+        metrics_dumper.add_derivative_metric("rounds.persistent");
+        metrics_dumper.add_derivative_metric("round_attempts.persistent");
+        metrics_dumper.add_derivative_metric("block_candidates.persistent");
+        metrics_dumper.add_derivative_metric("vote_candidates.persistent");
+        metrics_dumper.add_derivative_metric("block_candidates_signatures.persistent");
+        metrics_dumper.add_derivative_metric("sent_blocks.persistent");
+        metrics_dumper.add_derivative_metric("old_round_vectors.persistent");
+        metrics_dumper.add_derivative_metric("round_vectors.persistent");
+        metrics_dumper.add_derivative_metric("round_attempt_vectors.persistent");
+        metrics_dumper.add_derivative_metric("block_candidate_vectors.persistent");
+        metrics_dumper.add_derivative_metric("vote_candidate_vectors.persistent");
         metrics_dumper
-            .add_derivative_metric("block_candidate_signature_vectors.persistent".to_string());
-        metrics_dumper.add_derivative_metric("sent_block_vectors.persistent".to_string());
-        metrics_dumper.add_derivative_metric("bool_vectors.persistent".to_string());
-        metrics_dumper.add_derivative_metric("integer_vectors.persistent".to_string());
+            .add_derivative_metric("block_candidate_signature_vectors.persistent");
+        metrics_dumper.add_derivative_metric("sent_block_vectors.persistent");
+        metrics_dumper.add_derivative_metric("bool_vectors.persistent");
+        metrics_dumper.add_derivative_metric("integer_vectors.persistent");
 
         metrics_dumper
-            .add_compute_handler("sent_blocks.temp".to_string(), &compute_instance_counter);
+            .add_compute_handler("sent_blocks.temp", compute_instance_counter);
         metrics_dumper.add_compute_handler(
-            "block_candidates_signatures.temp".to_string(),
-            &compute_instance_counter,
+            "block_candidates_signatures.temp",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "block_candidates.temp".to_string(),
-            &compute_instance_counter,
+            "block_candidates.temp",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "vote_candidates.temp".to_string(),
-            &compute_instance_counter,
-        );
-        metrics_dumper
-            .add_compute_handler("round_attempts.temp".to_string(), &compute_instance_counter);
-        metrics_dumper.add_compute_handler("rounds.temp".to_string(), &compute_instance_counter);
-        metrics_dumper
-            .add_compute_handler("old_rounds.temp".to_string(), &compute_instance_counter);
-        metrics_dumper
-            .add_compute_handler("session_states.temp".to_string(), &compute_instance_counter);
-        metrics_dumper.add_compute_handler(
-            "integer_vectors.temp".to_string(),
-            &compute_instance_counter,
+            "vote_candidates.temp",
+            compute_instance_counter,
         );
         metrics_dumper
-            .add_compute_handler("bool_vectors.temp".to_string(), &compute_instance_counter);
+            .add_compute_handler("round_attempts.temp", compute_instance_counter);
+        metrics_dumper.add_compute_handler("rounds.temp", compute_instance_counter);
+        metrics_dumper
+            .add_compute_handler("old_rounds.temp", compute_instance_counter);
+        metrics_dumper
+            .add_compute_handler("session_states.temp", compute_instance_counter);
         metrics_dumper.add_compute_handler(
-            "block_candidate_vectors.temp".to_string(),
-            &compute_instance_counter,
+            "integer_vectors.temp",
+            compute_instance_counter,
+        );
+        metrics_dumper
+            .add_compute_handler("bool_vectors.temp", compute_instance_counter);
+        metrics_dumper.add_compute_handler(
+            "block_candidate_vectors.temp",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "block_candidate_signature_vectors.temp".to_string(),
-            &compute_instance_counter,
+            "block_candidate_signature_vectors.temp",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "vote_candidate_vectors.temp".to_string(),
-            &compute_instance_counter,
+            "vote_candidate_vectors.temp",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "round_attempt_vectors.temp".to_string(),
-            &compute_instance_counter,
+            "round_attempt_vectors.temp",
+            compute_instance_counter,
         );
         metrics_dumper.add_compute_handler(
-            "old_round_vectors.temp".to_string(),
-            &compute_instance_counter,
+            "old_round_vectors.temp",
+            compute_instance_counter,
         );
-        metrics_dumper.add_derivative_metric("session_states.temp".to_string());
-        metrics_dumper.add_derivative_metric("old_rounds.temp".to_string());
-        metrics_dumper.add_derivative_metric("rounds.temp".to_string());
-        metrics_dumper.add_derivative_metric("round_attempts.temp".to_string());
-        metrics_dumper.add_derivative_metric("block_candidates.temp".to_string());
-        metrics_dumper.add_derivative_metric("vote_candidates.temp".to_string());
-        metrics_dumper.add_derivative_metric("block_candidates_signatures.temp".to_string());
-        metrics_dumper.add_derivative_metric("sent_blocks.temp".to_string());
-        metrics_dumper.add_derivative_metric("old_round_vectors.temp".to_string());
-        metrics_dumper.add_derivative_metric("round_vectors.temp".to_string());
-        metrics_dumper.add_derivative_metric("round_attempt_vectors.temp".to_string());
-        metrics_dumper.add_derivative_metric("block_candidate_vectors.temp".to_string());
-        metrics_dumper.add_derivative_metric("vote_candidate_vectors.temp".to_string());
-        metrics_dumper.add_derivative_metric("block_candidate_signature_vectors.temp".to_string());
-        metrics_dumper.add_derivative_metric("sent_block_vectors.temp".to_string());
-        metrics_dumper.add_derivative_metric("bool_vectors.temp".to_string());
-        metrics_dumper.add_derivative_metric("integer_vectors.temp".to_string());
+        metrics_dumper.add_derivative_metric("session_states.temp");
+        metrics_dumper.add_derivative_metric("old_rounds.temp");
+        metrics_dumper.add_derivative_metric("rounds.temp");
+        metrics_dumper.add_derivative_metric("round_attempts.temp");
+        metrics_dumper.add_derivative_metric("block_candidates.temp");
+        metrics_dumper.add_derivative_metric("vote_candidates.temp");
+        metrics_dumper.add_derivative_metric("block_candidates_signatures.temp");
+        metrics_dumper.add_derivative_metric("sent_blocks.temp");
+        metrics_dumper.add_derivative_metric("old_round_vectors.temp");
+        metrics_dumper.add_derivative_metric("round_vectors.temp");
+        metrics_dumper.add_derivative_metric("round_attempt_vectors.temp");
+        metrics_dumper.add_derivative_metric("block_candidate_vectors.temp");
+        metrics_dumper.add_derivative_metric("vote_candidate_vectors.temp");
+        metrics_dumper.add_derivative_metric("block_candidate_signature_vectors.temp");
+        metrics_dumper.add_derivative_metric("sent_block_vectors.temp");
+        metrics_dumper.add_derivative_metric("bool_vectors.temp");
+        metrics_dumper.add_derivative_metric("integer_vectors.temp");
 
         use catchain::utils::add_compute_percentage_metric;
         use catchain::utils::add_compute_relative_metric;
         use catchain::utils::add_compute_result_metric;
 
-        metrics_dumper.add_derivative_metric("validator_session_main_loop_iterations".to_string());
-        metrics_dumper.add_derivative_metric("validator_session_main_loop_overloads".to_string());
+        metrics_dumper.add_derivative_metric("validator_session_main_loop_iterations");
+        metrics_dumper.add_derivative_metric("validator_session_main_loop_overloads");
         metrics_dumper
-            .add_derivative_metric("validator_session_callbacks_loop_iterations".to_string());
+            .add_derivative_metric("validator_session_callbacks_loop_iterations");
         metrics_dumper
-            .add_derivative_metric("validator_session_callbacks_loop_overloads".to_string());
+            .add_derivative_metric("validator_session_callbacks_loop_overloads");
         add_compute_percentage_metric(
             &mut metrics_dumper,
-            &"validator_session_main_loop_load".to_string(),
-            &"validator_session_main_loop_overloads".to_string(),
-            &"validator_session_main_loop_iterations".to_string(),
-            0.0,
-        );
-        add_compute_percentage_metric(
-            &mut metrics_dumper,
-            &"validator_session_callbacks_loop_load".to_string(),
-            &"validator_session_callbacks_loop_overloads".to_string(),
-            &"validator_session_callbacks_loop_iterations".to_string(),
+            "validator_session_main_loop_load",
+            "validator_session_main_loop_overloads",
+            "validator_session_main_loop_iterations",
             0.0,
         );
         add_compute_percentage_metric(
             &mut metrics_dumper,
-            &"active_nodes".to_string(),
-            &"active_weight".to_string(),
-            &"total_weight".to_string(),
+            "validator_session_callbacks_loop_load",
+            "validator_session_callbacks_loop_overloads",
+            "validator_session_callbacks_loop_iterations",
+            0.0,
+        );
+        add_compute_percentage_metric(
+            &mut metrics_dumper,
+            "active_nodes",
+            "active_weight",
+            "total_weight",
             0.0,
         );
 
-        add_compute_result_metric(&mut metrics_dumper, &"collate_requests".to_string());
-        add_compute_result_metric(&mut metrics_dumper, &"collate_requests_expire".to_string());
-        add_compute_result_metric(&mut metrics_dumper, &"validate_requests".to_string());
-        add_compute_result_metric(&mut metrics_dumper, &"commit_requests".to_string());
-        add_compute_result_metric(&mut metrics_dumper, &"rldp_queries".to_string());
-        add_compute_result_metric(&mut metrics_dumper, &"temp_cache_reuse".to_string());
-        add_compute_result_metric(&mut metrics_dumper, &"persistent_cache_reuse".to_string());
-        metrics_dumper.add_derivative_metric("rldp_queries.total".to_string());
-        metrics_dumper.add_derivative_metric("validate_requests.total".to_string());
-        metrics_dumper.add_derivative_metric("validate_requests.failure".to_string());
-        metrics_dumper.add_derivative_metric("validate_requests.success".to_string());
-        metrics_dumper.add_derivative_metric("collate_requests.total".to_string());
-        metrics_dumper.add_derivative_metric("collate_requests.failure".to_string());
-        metrics_dumper.add_derivative_metric("collate_requests.success".to_string());
-        metrics_dumper.add_derivative_metric("commit_requests.total".to_string());
-        metrics_dumper.add_derivative_metric("commit_requests.failure".to_string());
-        metrics_dumper.add_derivative_metric("commit_requests.success".to_string());
+        add_compute_result_metric(&mut metrics_dumper, "collate_requests");
+        add_compute_result_metric(&mut metrics_dumper, "collate_requests_expire");
+        add_compute_result_metric(&mut metrics_dumper, "validate_requests");
+        add_compute_result_metric(&mut metrics_dumper, "commit_requests");
+        add_compute_result_metric(&mut metrics_dumper, "rldp_queries");
+        add_compute_result_metric(&mut metrics_dumper, "temp_cache_reuse");
+        add_compute_result_metric(&mut metrics_dumper, "persistent_cache_reuse");
+        metrics_dumper.add_derivative_metric("rldp_queries.total");
+        metrics_dumper.add_derivative_metric("validate_requests.total");
+        metrics_dumper.add_derivative_metric("validate_requests.failure");
+        metrics_dumper.add_derivative_metric("validate_requests.success");
+        metrics_dumper.add_derivative_metric("collate_requests.total");
+        metrics_dumper.add_derivative_metric("collate_requests.failure");
+        metrics_dumper.add_derivative_metric("collate_requests.success");
+        metrics_dumper.add_derivative_metric("commit_requests.total");
+        metrics_dumper.add_derivative_metric("commit_requests.failure");
+        metrics_dumper.add_derivative_metric("commit_requests.success");
 
-        metrics_dumper.add_derivative_metric("process_blocks_calls".to_string());
-        metrics_dumper.add_derivative_metric("preprocess_block_calls".to_string());
-        metrics_dumper.add_derivative_metric("request_new_block_calls".to_string());
-        metrics_dumper.add_derivative_metric("check_all_calls".to_string());
+        metrics_dumper.add_derivative_metric("process_blocks_calls");
+        metrics_dumper.add_derivative_metric("preprocess_block_calls");
+        metrics_dumper.add_derivative_metric("request_new_block_calls");
+        metrics_dumper.add_derivative_metric("check_all_calls");
         add_compute_relative_metric(
             &mut metrics_dumper,
-            &"process_blocks_avg_capacity".to_string(),
-            &"preprocess_block_calls".to_string(),
-            &"process_blocks_calls".to_string(),
+            "process_blocks_avg_capacity",
+            "preprocess_block_calls",
+            "process_blocks_calls",
             0.0,
         );
         add_compute_relative_metric(
             &mut metrics_dumper,
-            &"request_new_block_capacity".to_string(),
-            &"preprocess_block_calls".to_string(),
-            &"request_new_block_calls".to_string(),
+            "request_new_block_capacity",
+            "preprocess_block_calls",
+            "request_new_block_calls",
             0.0,
         );
         add_compute_relative_metric(
             &mut metrics_dumper,
-            &"iterations_per_check_all".to_string(),
-            &"validator_session_main_loop_iterations".to_string(),
-            &"check_all_calls".to_string(),
+            "iterations_per_check_all",
+            "validator_session_main_loop_iterations",
+            "check_all_calls",
             0.0,
         );
         add_compute_relative_metric(
             &mut metrics_dumper,
-            &"check_all_per_request_new_block".to_string(),
-            &"check_all_calls".to_string(),
-            &"request_new_block_calls".to_string(),
+            "check_all_per_request_new_block",
+            "check_all_calls",
+            "request_new_block_calls",
             0.0,
         );
         add_compute_relative_metric(
             &mut metrics_dumper,
-            &"candidates_per_round".to_string(),
-            &"sent_blocks.persistent".to_string(),
-            &"commit_requests.total".to_string(),
+            "candidates_per_round",
+            "sent_blocks.persistent",
+            "commit_requests.total",
             0.0,
         );
 
-        metrics_dumper.add_derivative_metric("processing_queue.pulls".to_string());
-        metrics_dumper.add_derivative_metric("processing_queue.posts".to_string());
-        metrics_dumper.add_derivative_metric("callbacks_queue.pulls".to_string());
-        metrics_dumper.add_derivative_metric("callbacks_queue.posts".to_string());
-
-        metrics_dumper.add_compute_handler(
-            "processing_queue".to_string(),
-            &catchain::utils::compute_queue_size_counter,
-        );
-        metrics_dumper.add_compute_handler(
-            "callbacks_queue".to_string(),
-            &catchain::utils::compute_queue_size_counter,
-        );
+        metrics_dumper.add_derivative_metric("processing_queue.pulls");
+        metrics_dumper.add_derivative_metric("processing_queue.posts");
+        metrics_dumper.add_derivative_metric("callbacks_queue.pulls");
+        metrics_dumper.add_derivative_metric("callbacks_queue.posts");
 
         metrics_dumper.add_compute_handler(
-            "state_merge_cache_items".to_string(),
-            &catchain::utils::compute_instance_counter,
+            "processing_queue",
+            catchain::utils::compute_queue_size_counter,
         );
-        add_compute_result_metric(&mut metrics_dumper, &"state_merge_cache_reuse".to_string());
         metrics_dumper.add_compute_handler(
-            "block_update_cache_items".to_string(),
-            &catchain::utils::compute_instance_counter,
+            "callbacks_queue",
+            catchain::utils::compute_queue_size_counter,
         );
-        add_compute_result_metric(&mut metrics_dumper, &"block_update_cache_reuse".to_string());
+
+        metrics_dumper.add_compute_handler(
+            "state_merge_cache_items",
+            catchain::utils::compute_instance_counter,
+        );
+        add_compute_result_metric(&mut metrics_dumper, "state_merge_cache_reuse");
+        metrics_dumper.add_compute_handler(
+            "block_update_cache_items",
+            catchain::utils::compute_instance_counter,
+        );
+        add_compute_result_metric(&mut metrics_dumper, "block_update_cache_reuse");
 
         //main loop
 
@@ -912,10 +913,7 @@ impl SessionImpl {
                 //handle session event with timeout
 
                 let now = SystemTime::now();
-                let timeout = match processor.borrow().get_next_awake_time().duration_since(now) {
-                    Ok(timeout) => timeout,
-                    Err(_err) => Duration::default(),
-                };
+                let timeout = processor.borrow().get_next_awake_time().duration_since(now).unwrap_or_default();
 
                 const MAX_TIMEOUT: Duration = Duration::from_secs(2); //such little timeout is needed to check should_stop_flag and thread exiting
                 const MAX_UNPRIORITIZED_PULLS_TIMEOUT: Duration = Duration::from_secs(2); //max timeout for processing only prioritized events
@@ -963,7 +961,7 @@ impl SessionImpl {
                 instrument!();
                 check_execution_time!(50_000);
 
-                metrics_dumper.update(&processor.borrow().get_description().get_metrics_receiver());
+                metrics_dumper.update(processor.borrow().get_description().get_metrics_receiver());
 
                 if log::log_enabled!(log::Level::Debug) {
                     let session_id_str = session_id.to_hex_string();
@@ -1089,7 +1087,7 @@ impl SessionImpl {
     */
 
     pub(crate) fn create_task_queue(
-        name: String,
+        name: impl ToString,
         linked_queue: Option<TaskQueuePtr>,
         metrics_receiver: catchain::utils::MetricsHandle,
     ) -> TaskQueuePtr {
@@ -1098,9 +1096,9 @@ impl SessionImpl {
             crossbeam::channel::Receiver<Box<TaskDesc<TaskPtr>>>,
         );
 
-        let (queue_sender, queue_receiver): ChannelPair = crossbeam::crossbeam_channel::unbounded();
+        let (queue_sender, queue_receiver): ChannelPair = crossbeam::channel::unbounded();
         let task_queue: TaskQueuePtr = Arc::new(TaskQueueImpl::<TaskPtr>::new(
-            name,
+            name.to_string(),
             queue_sender,
             queue_receiver,
             linked_queue,
@@ -1118,7 +1116,7 @@ impl SessionImpl {
             crossbeam::channel::Receiver<Box<TaskDesc<CallbackTaskPtr>>>,
         );
 
-        let (queue_sender, queue_receiver): ChannelPair = crossbeam::crossbeam_channel::unbounded();
+        let (queue_sender, queue_receiver): ChannelPair = crossbeam::channel::unbounded();
         let task_queue: CallbackTaskQueuePtr = Arc::new(TaskQueueImpl::<CallbackTaskPtr>::new(
             "callbacks".to_string(),
             queue_sender,
@@ -1144,13 +1142,13 @@ impl SessionImpl {
             weight: 1,
         }];
 
-        let mut updated_options = options.clone();
+        let mut updated_options = *options;
         updated_options.catchain_idle_timeout = Duration::from_millis(1);
 
         Self::create(
             &updated_options,
             session_id,
-            &nodes,
+            nodes,
             local_key,
             path,
             db_suffix,
@@ -1163,7 +1161,7 @@ impl SessionImpl {
     pub(crate) fn create(
         options: &SessionOptions,
         session_id: &SessionId,
-        ids: &Vec<SessionNode>,
+        ids: Vec<SessionNode>,
         local_key: &PrivateKey,
         path: String,
         db_suffix: String,
@@ -1177,7 +1175,7 @@ impl SessionImpl {
 
         //remove fraction part from all timeouts
 
-        let mut options = options.clone();
+        let mut options = *options;
 
         options.catchain_idle_timeout =
             Duration::from_secs(options.catchain_idle_timeout.as_secs());
@@ -1193,11 +1191,11 @@ impl SessionImpl {
         //create task queues
 
         let main_task_queue =
-            Self::create_task_queue("processing".to_string(), None, metrics_receiver.clone());
+            Self::create_task_queue("processing", None, metrics_receiver.clone());
         let session_callbacks_task_queue =
             Self::create_callback_task_queue(metrics_receiver.clone());
         let session_callbacks_responses_task_queue = Self::create_task_queue(
-            "prioritized_processing".to_string(),
+            "prioritized_processing",
             Some(main_task_queue.clone()),
             metrics_receiver.clone(),
         );
@@ -1227,9 +1225,9 @@ impl SessionImpl {
         let catchain = catchain::CatchainFactory::create_catchain(
             &catchain_options,
             &session_id.clone(),
-            &catchain_nodes,
-            &local_key,
-            path.to_string(),
+            catchain_nodes,
+            local_key,
+            path,
             db_suffix,
             allow_unsafe_self_blocks_resync,
             overlay_manager,
@@ -1266,7 +1264,6 @@ impl SessionImpl {
         let stop_flag_for_callbacks_loop = stop_flag.clone();
         let session_callbacks_task_queue_for_main_loop = session_callbacks_task_queue.clone();
         let session_callbacks_task_queue_for_callbacks_loop = session_callbacks_task_queue.clone();
-        let ids_clone = ids.clone();
         let local_key_clone = local_key.clone();
         let session_id_clone = session_id.clone();
 
@@ -1276,7 +1273,7 @@ impl SessionImpl {
         let _main_processing_thread = std::thread::Builder::new()
             .name(format!(
                 "{}:{}",
-                MAIN_LOOP_NAME.to_string(),
+                MAIN_LOOP_NAME,
                 session_id.to_hex_string()
             ))
             .spawn(move || {
@@ -1289,7 +1286,7 @@ impl SessionImpl {
                     session_callbacks_task_queue_for_main_loop,
                     options,
                     session_id_clone,
-                    ids_clone,
+                    ids,
                     local_key_clone,
                     listener,
                     catchain,
@@ -1303,7 +1300,7 @@ impl SessionImpl {
         let _session_callbacks_processing_thread = std::thread::Builder::new()
             .name(format!(
                 "{}:{}",
-                CALLBACKS_LOOP_NAME.to_string(),
+                CALLBACKS_LOOP_NAME,
                 session_id.to_hex_string()
             ))
             .spawn(move || {
@@ -1328,9 +1325,7 @@ impl SessionImpl {
         let player = catchain::CatchainFactory::create_log_player(log_replay_options)?;
         let catchain_nodes = player.get_nodes();
         let weights = player.get_weights();
-        let mut nodes = Vec::new();
-
-        nodes.reserve(catchain_nodes.len());
+        let mut nodes = Vec::with_capacity(catchain_nodes.len());
 
         for i in 0..catchain_nodes.len() {
             let node = &catchain_nodes[i];
@@ -1346,7 +1341,7 @@ impl SessionImpl {
         Ok(Self::create(
             options,
             player.get_session_id(),
-            &nodes,
+            nodes,
             player.get_local_key(),
             log_replay_options.db_path.clone(),
             log_replay_options.db_suffix.clone(),

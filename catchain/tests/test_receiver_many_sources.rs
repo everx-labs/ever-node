@@ -55,18 +55,15 @@ async fn test_receiver_many_sources() {
 
     let mut source_ids: Vec<CatchainNode> = Vec::new();
 
-    for (_i, src) in sources.lines().enumerate() {
-        match src.split(": ").nth(1) {
-            Some(hex) => {
-                let public_key = parse_hex_as_public_key_raw(hex);
-                let adnl_id = get_public_key_hash(&public_key);
+    for src in sources.lines() {
+        if let Some(hex) = src.split(": ").nth(1) {
+            let public_key = parse_hex_as_public_key_raw(hex);
+            let adnl_id = get_public_key_hash(&public_key);
 
-                source_ids.push(CatchainNode {
-                    public_key: public_key,
-                    adnl_id: adnl_id,
-                });
-            }
-            None => (),
+            source_ids.push(CatchainNode {
+                public_key,
+                adnl_id,
+            });
         }
     }
 
@@ -94,19 +91,16 @@ async fn test_receiver_many_sources() {
 
     let dummy_key_hash = receiver.borrow().get_source_public_key_hash(0).clone();
     for msgs in messages.lines() {
-        match msgs.split(" = ").nth(1) {
-            Some(hex) => {
-                let message = parse_hex(hex);
+        if let Some(hex) = msgs.split(" = ").nth(1) {
+            let message = parse_hex(hex);
 
-                match receiver
-                    .borrow_mut()
-                    .receive_message_from_overlay(&dummy_key_hash, &mut message.as_ref())
-                {
-                    Ok(block) => info!("Block is received: {}", block.borrow()),
-                    Err(err) => error!("Block receiving error: {}", err),
-                };
-            }
-            None => (),
+            match receiver
+                .borrow_mut()
+                .receive_message_from_overlay(&dummy_key_hash, &mut message.as_ref())
+            {
+                Ok(block) => info!("Block is received: {}", block.borrow()),
+                Err(err) => error!("Block receiving error: {}", err),
+            };
         }
     }
 

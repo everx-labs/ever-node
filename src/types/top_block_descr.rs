@@ -33,8 +33,8 @@ use ton_api::ton::ton_node::newshardblock::NewShardBlock;
 pub use self::id::TopBlockDescrId;
 
 bitflags::bitflags! {
+    #[derive(Debug)]
     pub struct Mode: u8 {
-        const DEFAULT = 0;
         const FAIL_NEW = 1;
         const FAIL_TOO_NEW = 2;
         const ALLOW_OLD = 4;
@@ -190,8 +190,8 @@ impl TopBlockDescrStuff {
     }
 
     pub fn get_prev_at(&self, index: usize) -> Vec<BlockIdExt> {
-        if index < self.size() {
-            vec!(self.chain_blk_ids[index].clone())
+        if let Some(ch) = self.chain_blk_ids.get(index) {
+            vec!(ch.clone())
         } else if index == self.size() {
             self.chain_head_prev.clone()
         } else {
@@ -273,7 +273,7 @@ impl TopBlockDescrStuff {
     }
 
     pub fn proof_for(&self) -> &BlockIdExt {
-        &self.tbd.proof_for()
+        self.tbd.proof_for()
     }
 
     pub fn new_shard_block(&self) -> Result<NewShardBlock> {
@@ -281,9 +281,9 @@ impl TopBlockDescrStuff {
             .ok_or_else(|| error!("There is no signatures in top block descr"))?;
 
         Ok(NewShardBlock {
-            block: self.proof_for().clone().into(),
+            block: self.proof_for().clone(),
             cc_seqno: signatures.validator_info.catchain_seqno as i32,
-            data: self.top_block_descr().write_to_bytes()?.into(),
+            data: self.top_block_descr().write_to_bytes()?,
         })
     }
 
@@ -335,7 +335,7 @@ impl TopBlockDescrStuff {
 
         let (_, mut prev_stuff) = construct_and_check_prev_stuff(
             &block_virt_root,
-            &cur_id,
+            cur_id,
             false
         ).map_err(|e| {
             error!(
@@ -565,7 +565,7 @@ impl TopBlockDescrStuff {
         }
 
         let last_mc_state_extra = last_mc_state.shard_state_extra()?;
-        let mut next_mc_seqno = std::u32::MAX;
+        let mut next_mc_seqno = u32::MAX;
         for mc_id in self.chain_mc_blk_ids.iter() {
             if mc_id.seq_no() > next_mc_seqno {
                 *res_flags |= 1;  // permanently invalid
@@ -635,7 +635,7 @@ impl TopBlockDescrStuff {
             return Ok(-1); // valid, but too new
         }
 
-        let r_shard_descr = if !self.proof_for().shard().is_parent_for(&l_shard_descr.shard()) {
+        let r_shard_descr = if !self.proof_for().shard().is_parent_for(l_shard_descr.shard()) {
             // Shard S is presented in the current master state
             debug_assert!(l_shard_descr.block_id().shard().is_ancestor_for(self.proof_for().shard()));
             l_shard_descr.clone()
@@ -858,7 +858,7 @@ impl TopBlockDescrStuff {
             total_weight
         );
 
-        return Ok(clen as i32)
+        Ok(clen as i32)
     }
 }
 

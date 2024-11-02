@@ -10,6 +10,7 @@
 * See the License for the specific EVERX DEV software governing permissions and
 * limitations under the License.
 */
+#![allow(clippy::too_many_arguments)]
 
 use crate::{
     check_execution_time, instrument, serialize_tl_boxed_object,
@@ -206,7 +207,7 @@ impl Receiver for ReceiverImpl {
             return Ok(());
         }
 
-        let id = &self.get_block_dependency_id(&dep);
+        let id = &self.get_block_dependency_id(dep);
         let serialized_block_id = serialize_tl_boxed_object!(id);
 
         if let Some(_block) = self.get_block_by_hash(&utils::get_hash(&serialized_block_id)) {
@@ -257,7 +258,7 @@ impl Receiver for ReceiverImpl {
             return;
         }
 
-        let (processed, result) = self.process_query(&adnl_id, &data);
+        let (processed, result) = self.process_query(adnl_id, data);
 
         if processed {
             if result.is_ok() {
@@ -291,7 +292,7 @@ impl Receiver for ReceiverImpl {
     ) -> Result<ReceivedBlockPtr> {
         instrument!();
 
-        let id = self.get_block_id(&block, payload.data());
+        let id = self.get_block_id(block, payload.data());
         let hash = utils::get_block_id_hash(&id);
         let block_opt = self.get_block_by_hash(&hash);
 
@@ -323,7 +324,7 @@ impl Receiver for ReceiverImpl {
             return Err(warning);
         }
 
-        if let Err(validation_error) = self.validate_block_with_payload(&block, &payload) {
+        if let Err(validation_error) = self.validate_block_with_payload(block, &payload) {
             let warning = error!(
                 "Receiver {} received broken block from source {}: {}",
                 self.incarnation.to_hex_string(),
@@ -361,7 +362,7 @@ impl Receiver for ReceiverImpl {
             }
         }
 
-        let received_block = self.create_block_with_payload(&block, payload.clone())?;
+        let received_block = self.create_block_with_payload(block, payload.clone())?;
 
         if let Some(ref db) = self.db {
             let hash = hash.clone();
@@ -436,7 +437,7 @@ impl Receiver for ReceiverImpl {
 
                     return self.receive_block(
                         adnl_id,
-                        &message
+                        message
                             .downcast::<::ton_api::ton::catchain::Update>()
                             .unwrap()
                             .block(),
@@ -447,11 +448,11 @@ impl Receiver for ReceiverImpl {
 
                     //error!("{}", err);
 
-                    return Err(err);
+                    Err(err)
                 }
             }
             Err(err) => {
-                return Err(err);
+                Err(err)
             }
         }
     }
@@ -473,7 +474,7 @@ impl Receiver for ReceiverImpl {
 
         self.in_broadcasts_counter.increment(1);
 
-        self.notify_on_broadcast(source_key_hash, &data);
+        self.notify_on_broadcast(source_key_hash, data);
     }
 
     /*
@@ -537,7 +538,7 @@ impl Receiver for ReceiverImpl {
             receiver_addresses.push(adnl_id);
         }
 
-        if receiver_addresses.len() < 1 {
+        if receiver_addresses.is_empty() {
             return;
         }
 
@@ -550,7 +551,7 @@ impl Receiver for ReceiverImpl {
     fn process(&mut self) {
         instrument!();
 
-        if self.blocks_to_run.len() > 0 {
+        if !self.blocks_to_run.is_empty() {
             self.run_scheduler();
         }
     }
@@ -570,21 +571,21 @@ impl Receiver for ReceiverImpl {
         let block_opt = self.get_block_by_hash(&hash);
 
         if let Some(block) = block_opt {
-            return block;
+            block
         } else {
-            let new_block = ReceivedBlockImpl::create(&block, self);
+            let new_block = ReceivedBlockImpl::create(block, self);
 
             self.add_received_block(new_block.clone());
 
-            return new_block;
+            new_block
         }
     }
 
-    fn create_block_from_string_dump(&self, dump: &String) -> ReceivedBlockPtr {
+    fn create_block_from_string_dump(&self, dump: &str) -> ReceivedBlockPtr {
         ReceivedBlockImpl::create_from_string_dump(dump, self)
     }
 
-    fn parse_add_received_block(&mut self, s: &String) {
+    fn parse_add_received_block(&mut self, s: &str) {
         self.add_received_block(self.create_block_from_string_dump(s));
     }
 
@@ -743,7 +744,7 @@ impl Receiver for ReceiverImpl {
     }
 
     fn get_next_awake_time(&self) -> std::time::SystemTime {
-        self.next_awake_time.clone()
+        self.next_awake_time
     }
 
     /*
@@ -768,7 +769,7 @@ struct DummyTaskQueue {}
 impl ReceiverTaskQueue for DummyTaskQueue {
     fn post_utility_closure(&self, _handler: Box<dyn FnOnce() + Send>) {}
 
-    fn post_closure(&self, _handler: Box<dyn FnOnce(&mut dyn Receiver) + Send>) {}
+    fn post_closure(&self, _handler: crate::PostCallback) {}
 }
 
 struct DummyListener {
@@ -941,7 +942,7 @@ impl ReceiverImpl {
 
         log::info!("Catchain: need update root");
 
-        return false;
+        false
     }
 
     /*
@@ -974,7 +975,7 @@ impl ReceiverImpl {
     fn get_block_id(&self, block: &ton::Block, payload: &RawBuffer) -> ton::BlockId {
         utils::get_block_id(
             &block.incarnation,
-            &self.get_source_public_key_hash(block.src as usize),
+            self.get_source_public_key_hash(block.src as usize),
             block.height,
             payload,
         )
@@ -1016,7 +1017,7 @@ impl ReceiverImpl {
             return Ok(());
         }
 
-        let id = &self.get_block_id(&block, payload.data());
+        let id = &self.get_block_id(block, payload.data());
         let serialized_block_id = serialize_tl_boxed_object!(id);
 
         if let Some(_block) = self.get_block_by_hash(&utils::get_hash(&serialized_block_id)) {
@@ -1049,7 +1050,7 @@ impl ReceiverImpl {
 
     fn add_block_for_delivery(&mut self, payload: BlockPayloadPtr, deps: Vec<BlockHash>) {
         self.pending_blocks.push_back(PendingBlock {
-            payload: payload,
+            payload,
             dep_hashes: deps,
         });
     }
@@ -1078,9 +1079,7 @@ impl ReceiverImpl {
         //prepare prev block and dependencies
 
         let prev = self.last_sent_block.borrow().export_tl_dep();
-        let mut dep_tls = Vec::new();
-
-        dep_tls.reserve(deps.len());
+        let mut dep_tls = Vec::with_capacity(deps.len());
 
         for dep in deps {
             let block = self.get_block_by_hash(&dep);
@@ -1097,14 +1096,14 @@ impl ReceiverImpl {
 
         let height = prev.height + 1;
         let mut block = ton::Block {
-            incarnation: self.incarnation.clone().into(),
+            incarnation: self.incarnation.clone(),
             src: self.local_idx as i32,
-            height: height,
+            height,
             data: ton::BlockData {
-                prev: prev,
-                deps: dep_tls.into(),
+                prev,
+                deps: dep_tls,
             },
-            signature: Vec::new().into(), //block will be signed later
+            signature: Vec::new(), //block will be signed later
         };
 
         let block_id = self.get_block_id(&block, payload.data());
@@ -1114,7 +1113,7 @@ impl ReceiverImpl {
 
         match self.local_key.sign(&block_id_serialized) {
             Ok(block_id_signature) => {
-                block.signature = block_id_signature.to_vec().into();
+                block.signature = block_id_signature.to_vec();
             }
             Err(_err) => {
                 log::error!("...block signing error: {:?}", _err);
@@ -1265,28 +1264,26 @@ impl ReceiverImpl {
         self.initial_sync_complete_time = now
             + Duration::from_secs(if self.allow_unsafe_self_blocks_resync {
                 MAX_UNSAFE_INITIAL_SYNC_COMPLETE_TIME_SECS
+            } else if self.sources.len() == 1 {
+                //Special case: for one node in a network we don't need optimisation with block processing start lag
+                0
             } else {
-                if self.sources.len() == 1 {
-                    //Special case: for one node in a network we don't need optimisation with block processing start lag
-                    0
-                } else {
-                    //This lag is needed for optimization purpose during the restart
-                    //Restart flow:
-                    //- node reads root (last_sent_block) which means the LAST block which was generated
-                    //  and written to DB before restart, so forks between restored blocks and new
-                    //  generated blocks are impossible
-                    //- node fully reads DB with all root block's deps
-                    //- node starts blocks preprocessing which may take significant time
-                    //- during this preprocessing node can generate new blocks; in case some previously dead nodes
-                    //  appear after restart of this node it is possible node can generate new block based on messages
-                    //  received from such nodes; this may lead to decentralized consensus state change before preprocessing of
-                    //  all block which have been generated before restart, so consensus decisions will be done earlier
-                    //- there is no risk to publish any new block based on non-top blocks because the order in terms of height is
-                    //  guaranteed by last_sent_block (which is known before start of preprocessing)
-                    //- constant below (MAX_SAFE_INITIAL_SYNC_COMPLETE_TIME_SECS) provides reasonable timeout to skip very old blocks
-                    //  and prevent fully useless early blocks processing/merging 
-                    MAX_SAFE_INITIAL_SYNC_COMPLETE_TIME_SECS
-                }
+                //This lag is needed for optimization purpose during the restart
+                //Restart flow:
+                //- node reads root (last_sent_block) which means the LAST block which was generated
+                //  and written to DB before restart, so forks between restored blocks and new
+                //  generated blocks are impossible
+                //- node fully reads DB with all root block's deps
+                //- node starts blocks preprocessing which may take significant time
+                //- during this preprocessing node can generate new blocks; in case some previously dead nodes
+                //  appear after restart of this node it is possible node can generate new block based on messages
+                //  received from such nodes; this may lead to decentralized consensus state change before preprocessing of
+                //  all block which have been generated before restart, so consensus decisions will be done earlier
+                //- there is no risk to publish any new block based on non-top blocks because the order in terms of height is
+                //  guaranteed by last_sent_block (which is known before start of preprocessing)
+                //- constant below (MAX_SAFE_INITIAL_SYNC_COMPLETE_TIME_SECS) provides reasonable timeout to skip very old blocks
+                //  and prevent fully useless early blocks processing/merging 
+                MAX_SAFE_INITIAL_SYNC_COMPLETE_TIME_SECS
             });
 
         log::trace!(
@@ -1556,7 +1553,7 @@ impl ReceiverImpl {
             .collect();
 
         let get_difference_request = ton::GetDifferenceRequest {
-            rt: sources_delivered_heights.into(),
+            rt: sources_delivered_heights,
         };
 
         //send a difference query to a synchronization source
@@ -1631,7 +1628,7 @@ impl ReceiverImpl {
                 //send getBlock request for each absent hash
 
                 let get_block_request = ton::GetBlockRequest {
-                    block: dep_hash.clone().into(),
+                    block: dep_hash.clone(),
                 };
                 let source_adnl_id = source.borrow().get_adnl_id().clone();
                 let source_adnl_id_clone = source_adnl_id.clone();
@@ -1754,13 +1751,13 @@ impl ReceiverImpl {
                     Err(message) => message,
                 };
 
-                return (
+                (
                     false,
                     Err(error!("unknown query received {:?}", message)),
-                );
+                )
             }
             Err(err) => {
-                return (true, Err(err));
+                (true, Err(err))
             }
         }
     }
@@ -1785,16 +1782,11 @@ impl ReceiverImpl {
         //check is fork detected for sources
 
         let sources_count = self.get_sources_count();
-
-        for i in 0..sources_count {
-            if sources_delivered_heights[i] < 0 {
+        for (i, height) in sources_delivered_heights.iter().enumerate().take(sources_count) {
+            if *height < 0 {
                 continue;
             }
-
-            let source_ptr = self.get_source(i).clone();
-            let ref source = source_ptr.borrow();
-
-            if let Some(fork) = source.get_fork_proof() {
+            if let Some(fork) = self.get_source(i).borrow().get_fork_proof() {
                 //return differenceFork as response
                 return Ok(ton::DifferenceFork {
                     left: fork.left.clone().only(),
@@ -1901,7 +1893,7 @@ impl ReceiverImpl {
                     .unwrap();
                 let mut block = block_ptr.borrow_mut();
 
-                if block.mark_block_for_sending(&adnl_id) {
+                if block.mark_block_for_sending(adnl_id) {
                     //send block update event to counterparty
 
                     self.send_block_update_event(
@@ -1927,7 +1919,7 @@ impl ReceiverImpl {
         //send response to counterparty
 
         let response = ::ton_api::ton::catchain::difference::Difference {
-            sent_upto: response_sources_delivered_heights.into(),
+            sent_upto: response_sources_delivered_heights,
         }
         .into_boxed();
 
@@ -1961,7 +1953,7 @@ impl ReceiverImpl {
 
         let response = ::ton_api::ton::catchain::BlockResult::Catchain_BlockNotFound;
 
-        return Ok((response, CatchainFactory::create_empty_block_payload()));
+        Ok((response, CatchainFactory::create_empty_block_payload()))
     }
 
     fn process_get_blocks_query(
@@ -1982,16 +1974,16 @@ impl ReceiverImpl {
         let mut response_blocks_count = 0;
 
         for block_hash in &query.blocks {
-            if let Some(block_ptr) = self.get_block_by_hash(&block_hash) {
+            if let Some(block_ptr) = self.get_block_by_hash(block_hash) {
                 let mut block = block_ptr.borrow_mut();
 
-                assert!(block.get_payload().data().len() > 0);
+                assert!(!block.get_payload().data().is_empty());
 
                 if block.get_height() <= 0 {
                     continue;
                 }
 
-                if !block.mark_block_for_sending(&adnl_id) {
+                if !block.mark_block_for_sending(adnl_id) {
                     continue;
                 }
 
@@ -2057,9 +2049,9 @@ impl ReceiverImpl {
                     break;
                 }
 
-                assert!(block.get_payload().data().len() > 0);
+                assert!(!block.get_payload().data().is_empty());
 
-                if block.mark_block_for_sending(&adnl_id) {
+                if block.mark_block_for_sending(adnl_id) {
                     //send block back to the requester
 
                     self.send_block_update_event(
@@ -2235,8 +2227,8 @@ impl ReceiverImpl {
 
             listener.borrow_mut().send_message(
                 receiver_adnl_id,
-                &self.get_source(self.local_idx).borrow().get_adnl_id(),
-                &serialized_block_with_payload,
+                self.get_source(self.local_idx).borrow().get_adnl_id(),
+                serialized_block_with_payload,
                 can_be_postponed,
             );
         }
@@ -2266,15 +2258,15 @@ impl ReceiverImpl {
 
             listener.borrow_mut().send_message_multicast(
                 receiver_adnl_ids,
-                &self.get_source(self.local_idx).borrow().get_adnl_id(),
-                &serialized_block_with_payload,
+                self.get_source(self.local_idx).borrow().get_adnl_id(),
+                serialized_block_with_payload,
             );
         }
     }
 
     fn create_response_handler_boxed<T, F>(
         response_callback: F,
-    ) -> Box<dyn FnOnce(Result<BlockPayloadPtr>, &mut dyn Receiver)>
+    ) -> crate::catchain::ResponceCallback<BlockPayloadPtr>
     where
         T: 'static + ::ton_api::BoxedDeserialize + ::ton_api::AnyBoxedSerialize,
         F: FnOnce(Result<T>, BlockPayloadPtr, &mut dyn Receiver) + 'static,
@@ -2331,7 +2323,7 @@ impl ReceiverImpl {
     #[allow(dead_code)]
     fn create_response_handler<T, F>(
         response_callback: F,
-    ) -> Box<dyn FnOnce(Result<BlockPayloadPtr>, &mut dyn Receiver)>
+    ) -> crate::catchain::ResponceCallback<BlockPayloadPtr>
     where
         T: 'static + ::ton_api::BoxedDeserialize,
         F: FnOnce(Result<T>, BlockPayloadPtr, &mut dyn Receiver) + 'static,
@@ -2374,7 +2366,7 @@ impl ReceiverImpl {
 
             listener.borrow_mut().send_query(
                 receiver_adnl_id,
-                &self.get_source(self.local_idx).borrow().get_adnl_id(),
+                self.get_source(self.local_idx).borrow().get_adnl_id(),
                 "sync blocks",
                 GET_BLOCK_QUERY_TIMEOUT,
                 &CatchainFactory::create_block_payload(serialized_message),
@@ -2402,7 +2394,7 @@ impl ReceiverImpl {
 
             listener.borrow_mut().send_query(
                 receiver_adnl_id,
-                &self.get_source(self.local_idx).borrow().get_adnl_id(),
+                self.get_source(self.local_idx).borrow().get_adnl_id(),
                 "sync",
                 GET_DIFFERENCE_QUERY_TIMEOUT,
                 &CatchainFactory::create_block_payload(serialized_message),
@@ -2418,7 +2410,7 @@ impl ReceiverImpl {
     fn new(
         listener: ReceiverListenerPtr,
         incarnation: &SessionId,
-        ids: &Vec<CatchainNode>,
+        ids: &[CatchainNode],
         local_key: &PrivateKey,
         path: String,
         db_suffix: String,
@@ -2431,11 +2423,11 @@ impl ReceiverImpl {
             MetricsHandle::new(Some(Duration::from_secs(30)))
         };
         let received_blocks_instance_counter =
-            InstanceCounter::new(&metrics_receiver, &"received_blocks".to_owned());
+            InstanceCounter::new(&metrics_receiver, "received_blocks");
         let out_queries_counter =
-            ResultStatusCounter::new(&metrics_receiver, &"receiver_out_queries".to_owned());
+            ResultStatusCounter::new(&metrics_receiver, "receiver_out_queries");
         let in_queries_counter =
-            ResultStatusCounter::new(&metrics_receiver, &"receiver_in_queries".to_owned());
+            ResultStatusCounter::new(&metrics_receiver, "receiver_in_queries");
         let out_messages_counter = metrics_receiver.sink().register_counter(&"receiver_out_messages".into());
         let in_messages_counter = metrics_receiver.sink().register_counter(&"receiver_in_messages".into());
         let in_broadcasts_counter = metrics_receiver.sink().register_counter(&"receiver_in_broadcasts".into());
@@ -2503,10 +2495,10 @@ impl ReceiverImpl {
 
         let now = SystemTime::now();
         let mut obj = ReceiverImpl {
-            sources: sources,
-            public_key_hash_to_source: public_key_hash_to_source,
-            adnl_id_to_source: adnl_id_to_source,
-            source_public_key_hashes: source_public_key_hashes,
+            sources,
+            public_key_hash_to_source,
+            adnl_id_to_source,
+            source_public_key_hashes,
             incarnation: incarnation.clone(),
             options: Options::default(),
             blocks: HashMap::new(),
@@ -2518,17 +2510,17 @@ impl ReceiverImpl {
             _local_ids: ids.to_vec(),
             local_id: local_id.clone(),
             local_key: local_key.clone(),
-            local_idx: local_idx,
+            local_idx,
             total_forks: 0,
             neighbours: Vec::new(),
-            listener: listener,
-            metrics_receiver: metrics_receiver,
-            received_blocks_instance_counter: received_blocks_instance_counter,
-            out_queries_counter: out_queries_counter,
-            in_queries_counter: in_queries_counter,
-            out_messages_counter: out_messages_counter,
-            in_messages_counter: in_messages_counter,
-            in_broadcasts_counter: in_broadcasts_counter,
+            listener,
+            metrics_receiver,
+            received_blocks_instance_counter,
+            out_queries_counter,
+            in_queries_counter,
+            out_messages_counter,
+            in_messages_counter,
+            in_broadcasts_counter,
             pending_in_db: 0,
             db: None,
             read_db: false,
@@ -2562,7 +2554,7 @@ impl ReceiverImpl {
             public_key: public_key.clone(),
             adnl_id: public_key.id().clone(),
         }];
-        let incarnation = public_key.id().data().clone().into();
+        let incarnation = (*public_key.id().data()).into();
         let receiver_listener = ReceiverImpl::create_dummy_listener();
         let db_suffix = String::new();
         let allow_unsafe_self_blocks_resync = false;
@@ -2582,7 +2574,7 @@ impl ReceiverImpl {
     pub(crate) fn create(
         listener: ReceiverListenerPtr,
         incarnation: &SessionId,
-        ids: &Vec<CatchainNode>,
+        ids: &[CatchainNode],
         local_key: &PrivateKey,
         path: String,
         db_suffix: String,
@@ -2627,18 +2619,18 @@ impl ReceiverImpl {
 
                 existing_block
                     .borrow_mut()
-                    .initialize(&block, payload, self)?;
+                    .initialize(block, payload, self)?;
             }
 
-            return Ok(existing_block.clone());
+            Ok(existing_block.clone())
         } else {
             log::trace!("...create block with hash={:?}", block_hash);
 
-            let new_block = ReceivedBlockImpl::create_with_payload(&block, payload, self)?;
+            let new_block = ReceivedBlockImpl::create_with_payload(block, payload, self)?;
 
             self.add_received_block(new_block.clone());
 
-            return Ok(new_block);
+            Ok(new_block)
         }
     }
 }
