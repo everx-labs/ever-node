@@ -566,7 +566,7 @@ impl ValidatorManagerImpl {
         &mut self,
         sessions_to_remove: &HashSet<UInt256>,
         new_master_cc_range: Option<RangeInclusive<u32>>,
-        new_session_options: &validator_session::SessionOptions,
+        new_session_options: Option<&validator_session::SessionOptions>,
         destroy_database: bool
     ) {
         for id in sessions_to_remove.iter() {
@@ -806,7 +806,7 @@ impl ValidatorManagerImpl {
 
     async fn disable_validation(
         &mut self,
-        session_options: &validator_session::SessionOptions,
+        session_options: Option<&validator_session::SessionOptions>,
         clear_rotation: bool
     ) -> Result<()> {
         self.engine.set_validation_status(ValidationStatus::Disabled);
@@ -824,7 +824,7 @@ impl ValidatorManagerImpl {
     }
 
     async fn stop_validation(&mut self) {
-        if let Err(e) = self.disable_validation(false).await {
+        if let Err(e) = self.disable_validation(None, false).await {
             log::error!(target: "validator_manager", "Cannot disable validation: {}", e);
         };
 
@@ -1055,7 +1055,7 @@ impl ValidatorManagerImpl {
 
         if !self.update_validator_lists(&mc_state).await? {
             log::info!(target: "validator_manager", "Current validator list is empty, validation is disabled.");
-            self.disable_validation(&session_options, true).await?;
+            self.disable_validation(Some(&session_options), true).await?;
             return Ok(())
         }
 
@@ -1474,7 +1474,7 @@ impl ValidatorManagerImpl {
         self.stop_and_remove_sessions(
             &gc_validator_sessions,
             Some(master_cc_range),
-            &session_options,
+            Some(&session_options),
             true
         ).await;
         log::trace!(target: "validator_manager", "starting garbage collect");

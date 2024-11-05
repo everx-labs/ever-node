@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 ## Version 0.60.8
 
 - Forcing stop of all catchains
+- Forcing stop of all catchains when node shuts down
 
 ## Version 0.60.7
 

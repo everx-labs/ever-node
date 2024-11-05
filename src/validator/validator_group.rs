@@ -479,14 +479,14 @@ impl ValidatorGroup {
         self: Arc<ValidatorGroup>,
         rt: tokio::runtime::Handle,
         new_master_cc_range: Option<RangeInclusive<u32>>,
-        new_session_options: &validator_session::SessionOptions,
+        new_session_options: Option<&validator_session::SessionOptions>,
         destroy_database: bool
     ) -> Result<()> {
         self.set_status(ValidatorGroupStatus::Stopping).await?;
         log::info!(target: "validator", "Stopping group: {} (destroy database {})", self.info().await, destroy_database);
         let group_impl = self.group_impl.clone();
         let self_clone = self.clone();
-        let new_remp_catchain_options = construct_remp_catchain_options_from_config(new_session_options);
+        let new_remp_catchain_options = new_session_options.map(|opt| construct_remp_catchain_options_from_config(opt));
         rt.spawn({
             async move {
                 log::debug!(target: "validator", "Stopping group (spawn): {}", self_clone.info().await);
@@ -496,9 +496,9 @@ impl ValidatorGroup {
                     ).await;
                 if let Some(rmq) = reliable_message_queue {
                     log::debug!(target: "validator", "Stopping group (spawn) {}, rmq: {}", self_clone.info().await, rmq);
-                    if let Some(new_cc_range) = new_master_cc_range {
+                    if let (Some(new_cc_range), Some(new_remp_cc_opts)) = (new_master_cc_range, new_remp_catchain_options) {
                         log::debug!(target: "validator", "Forwarding messages, rmq: {}, new cc range: {:?}", rmq, new_cc_range);
-                        rmq.forward_messages(&new_cc_range, self_clone.local_key.clone(), &new_remp_catchain_options).await;
+                        rmq.forward_messages(&new_cc_range, self_clone.local_key.clone(), &new_remp_cc_opts).await;
                         log::debug!(target: "validator", "Messages forwarded, rmq: {}, new cc range: {:?}", rmq, new_cc_range);
                     }
                 }
