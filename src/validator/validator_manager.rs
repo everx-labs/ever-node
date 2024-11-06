@@ -609,8 +609,8 @@ impl ValidatorManagerImpl {
         }
     }
 
-    async fn compute_session_options(&mut self, mc_state_extra: &McStateExtra)
-    -> Result<(validator_session::SessionOptions, UInt256)> {
+    async fn compute_session_options(&mut self, mc_state_extra: &McStateExtra) -> Result<(validator_session::SessionOptions, UInt256)> 
+    {
         let consensus_config = match mc_state_extra.config.config(29)? {
             Some(ConfigParamEnum::ConfigParam29(ccc)) => ccc.consensus_config,
             _ => fail!("no CatchainConfig in config_params"),
@@ -1477,6 +1477,7 @@ impl ValidatorManagerImpl {
             Some(&session_options),
             true
         ).await;
+
         log::trace!(target: "validator_manager", "starting garbage collect");
         self.garbage_collect().await;
         log::trace!(target: "validator_manager", "exiting");
