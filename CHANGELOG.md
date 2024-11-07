@@ -2,10 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
-## Version 0.60.9
+## Version 0.60.10
 
 - SMFT arbitrage
 - Added REMP blocks enumeration (get rid of equal blocks)
+
+## Version 0.60.9
+
+- Fixed memory leak with storing cells
 
 ## Version 0.60.8
 
