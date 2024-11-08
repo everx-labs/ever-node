@@ -133,8 +133,8 @@ fn test_rmq_max_payload_constants() -> Result<()> {
                 source_idx: idx as i32,
                 masterchain_seqno: idx as i32
             }
-        )
-    ));
+        )), 0
+    );
     println!("{} headers give total payload of {} bytes", hp_ids.len(), header_payload.data().len());
     assert!(header_payload.data().len() <= REMP_MAX_BLOCK_PAYLOAD_LEN);
 
@@ -149,7 +149,7 @@ fn test_rmq_max_payload_constants() -> Result<()> {
             };
             ton_api::ton::ton_node::RempCatchainRecordV2::TonNode_RempCatchainMessageDigestV2(digest)
         }
-    ));
+    ), 0);
     println!("{} digests give total payload of {} bytes", dp_ids.len(), digest_payload.data().len());
     assert!(digest_payload.data().len() <= REMP_MAX_BLOCK_PAYLOAD_LEN);
 

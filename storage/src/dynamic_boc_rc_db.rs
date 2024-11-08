@@ -409,14 +409,21 @@ impl DynamicBocDb {
         );
 
         for (id, _) in visited.iter() {
-            if self.storing_cells.remove(id).is_some() {
-                log::trace!(
-                    target: TARGET,
-                    "DynamicBocDb::save_boc  {:x}  cell removed from storing_cells", id
-                );
-                let _storing_cells_count = self.storing_cells_count.fetch_sub(1, Ordering::Relaxed);
-                #[cfg(feature = "telemetry")]
-                self.telemetry.storing_cells.update(_storing_cells_count - 1);
+            let mut stack = vec![id.clone()];
+            while let Some(id) = stack.pop() {
+                if let Some(removed) = self.storing_cells.remove(&id) {
+                    log::trace!(
+                        target: TARGET,
+                        "DynamicBocDb::save_boc  {:x}  cell removed from storing_cells", id
+                    );
+                    let _storing_cells_count = self.storing_cells_count.fetch_sub(1, Ordering::Relaxed);
+                    #[cfg(feature = "telemetry")]
+                    self.telemetry.storing_cells.update(_storing_cells_count - 1);
+
+                    for i in 0..removed.val().references_count() {
+                        stack.push(removed.val().reference_repr_hash(i)?);
+                    }
+                }
             }
         }
 

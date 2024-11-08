@@ -114,23 +114,6 @@ impl VerificationManager for VerificationManagerImpl {
         }
     }
 
-    /// Get block status (delivered, rejected)
-    fn get_block_status(
-        &self,
-        block_id: &BlockIdExt,
-    ) -> (bool, bool) {
-        let workchain_id = block_id.shard_id.workchain_id();
-        let workchain = self.workchains.lock().get(&workchain_id).cloned();
-
-        if let Some(workchain) = workchain {
-            if let Some(block) = workchain.get_block_by_id(block_id) {
-                return workchain.get_block_status(&block);
-            }
-        }
-
-        (false, false)
-    }
-
     /// Wait for block verification
     fn wait_for_block_verification(
         &self,
@@ -158,20 +141,32 @@ impl VerificationManager for VerificationManagerImpl {
             loop {
                   //check block status
 
-                if let Some(block) = workchain.get_block_by_id(block_id) {
-                    let (delivered, rejected) = workchain.get_block_status(&block);
+                if let Some(block) = workchain.get_block_by_id(&block_id) {
+                    let block_status_desc = workchain.get_block_status(&block);
 
                     workchain.update_block_external_delivery_metrics(block_id, &start_time);
 
-                    if rejected {
-                        log::warn!(target: "verificator", "Finish block {} verification - NACK detected", block_id);
+                    if block_status_desc.has_rejections {
+                        if block_status_desc.is_approved {
+                            log::warn!(target: "verificator", "Finish block {} verification - NACK detected, but block has been approved by consensus of workchain nodes after an arbitrage", block_id);
+                            return true;
+                        } else {
+                            log::warn!(target: "verificator", "Finish block {} verification - NACK detected. Request for arbitrage", block_id);
 
-                        workchain.start_arbitrage(block_id);
+                            let request_all = true;
+                            workchain.start_force_block_delivery(&block_id, request_all);
 
-                        return false;
+                            if timeout.as_millis() == 0 {
+                                //special case: in case of mc_max_delivery_wait_timeout = 0 - work in shadow mode and allow blocks with NACKs to be included in MC
+                                log::warn!(target: "verificator", "Block {} with NACK is included in MC due to SMFT shadow mode (mc_max_delivery_wait_timeout=0)", block_id);
+                                return true;
+                            }
+
+                            return false;
+                        }
                     }
 
-                    if delivered && !rejected {
+                    if block_status_desc.is_delivered && !block_status_desc.has_rejections {
                         log::trace!(target: "verificator", "Finish block {} verification - DELIVERED", block_id);
                         return true;
                     }
@@ -184,7 +179,8 @@ impl VerificationManager for VerificationManagerImpl {
                     log::warn!(target: "verificator", "Can't verify block {}: timeout {}ms expired. Start force block delivery", block_id, elapsed_time.as_millis());
                     workchain.update_block_external_delivery_metrics(block_id, &start_time);
 
-                    workchain.start_force_block_delivery(block_id);
+                    let request_all = false;
+                    workchain.start_force_block_delivery(&block_id, request_all);
 
                     if timeout.as_millis() == 0 {
                         //special case: in case of mc_max_delivery_wait_timeout = 0 - work in shadow mode and allow unverified blocks to be included in MC

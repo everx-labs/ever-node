@@ -29,7 +29,7 @@ echo "Press ENTER to start transactions"
 read -r input
 
 echo "Preparation (0/6) deploing giver"
-$CLI/tonos-cli \
+$CLI/ever-cli \
     message "-1:7777777777777777777777777777777777777777777777777777777777777777" \
     constructor '{
         "owners":["0xc86b504dbbcf2263c6d5985743f1b248eca31d9ae37d273102ddd2b6ccd95c8a"],
@@ -47,7 +47,7 @@ while true; do
     echo "Enter amount of money to transfer: "
     read -r input
     echo "Preparation (1/6) sending money to Brazil contract"
-    $CLI/tonos-cli \
+    $CLI/ever-cli \
         message "-1:7777777777777777777777777777777777777777777777777777777777777777" \
         submitTransaction "{
             \"dest\" : \"0:4a5ed5323d510dedb4cd8b6bf322b89b73eaec0b359ce46e3557c46499f2d64c\",

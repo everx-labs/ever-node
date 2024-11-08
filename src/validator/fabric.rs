@@ -246,6 +246,7 @@ pub async fn run_collate_query (
     collator_id: PublicKey,
     set: ValidatorSet,
     engine: Arc<dyn EngineOperations>,
+    verification_manager: Option<VerificationManagerPtr>,
 ) -> Result<ValidatorBlockCandidate>
 {
     #[cfg(not(feature = "statsd"))]
@@ -264,7 +265,8 @@ pub async fn run_collate_query (
         engine.clone(),
         None,
         remp_collator_interface,
-        CollatorSettings::default()
+        CollatorSettings::default(),
+        verification_manager,
     )?;
     let collator_result = collator.collate().await;
 

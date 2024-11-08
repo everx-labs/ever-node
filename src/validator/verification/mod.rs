@@ -34,6 +34,7 @@ mod utils;
 
 pub const DEFAULT_USE_DEBUG_BLS_KEYS: bool = true; //generate missing BLS key from ED25519 public key (only for testing)
 pub const USE_VALIDATORS_WEIGHTS: bool = false; //use weights from ValidatorDescr for BLS signature weight aggregation
+pub const DEBUG_NACK_APPEARENCE: bool = false; //emulate appearance of NACK messages
 
 /// Engine ptr
 type EnginePtr = Arc<dyn EngineOperations>;
@@ -64,13 +65,6 @@ pub trait VerificationManager: Sync + Send {
     /// New block broadcast has been generated
     async fn send_new_block_candidate(&self, candidate: &BlockCandidate);
 
-    #[allow(dead_code)]
-    /// Get block status (delivered, rejected)
-    fn get_block_status(
-        &self,
-        block_id: &BlockIdExt,
-    ) -> (bool, bool);
-
     /// Wait for block verification
     fn wait_for_block_verification(
         &self,
@@ -91,11 +85,6 @@ pub trait VerificationManager: Sync + Send {
         listener: &VerificationListenerPtr,
         use_debug_bls_keys: bool,
     );
-
-    /*
-    /// Reset workchains
-    async fn reset_workchains<'a>(&'a self);
-    */
 }
 
 /// Factory for verification objects

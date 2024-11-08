@@ -31,6 +31,7 @@ use crate::{
     },
     validator::{
         BlockCandidate, CollatorSettings, McData,
+        verification::VerificationManagerPtr,
         out_msg_queue::{MsgQueueManager, OutMsgQueueInfoStuff}, 
         validator_utils::calc_subset_for_masterchain
     },
@@ -1057,6 +1058,7 @@ pub struct Collator {
     after_merge: bool,
     after_split: bool,
     validator_set: ValidatorSet,
+    verification_manager: Option<VerificationManagerPtr>,
 
     // string with format like `-1:8000000000000000, 100500`, is used for logging.
     collated_block_descr: Arc<String>,
@@ -1080,7 +1082,8 @@ impl Collator {
         engine: Arc<dyn EngineOperations>,
         rand_seed: Option<UInt256>,
         remp_collator_interface: Option<Arc<dyn RempQueueCollatorInterface>>,
-        collator_settings: CollatorSettings
+        collator_settings: CollatorSettings,
+        verification_manager: Option<VerificationManagerPtr>,
     ) -> Result<Self> {
 
         let prev_blocks_ids = prev_blocks_history.get_prevs().to_vec();
@@ -1170,6 +1173,7 @@ impl Collator {
             collator_settings,
             started: Instant::now(),
             stop_flag: Arc::new(AtomicBool::new(false)),
+            verification_manager,
         })
     }
 
@@ -1968,6 +1972,22 @@ impl Collator {
             self.check_stop_flag()?;
             let mut res_flags = 0;
             let now = std::time::Instant::now();
+
+            let top_block_id = sh_bd.proof_for();
+            if !top_block_id.shard().is_masterchain() && top_block_id.seq_no > 0 {
+                //check only shard blocks during MC validator, skip masterchain blocks
+                //ignore zerostate checks
+                if let Some(ref verification_manager) = &self.verification_manager {
+                    log::debug!("checking ShardTopBlockDescr {} via SMFT", top_block_id);
+                    log::debug!(target: "verificator", "checking ShardTopBlockDescr {} via SMFT", top_block_id);
+                    if !verification_manager.wait_for_block_verification(&top_block_id, None /* use timeout from node config */) {
+                        log::warn!("ShardTopBlockDescr for {} skipped (due to SMFT)", top_block_id);
+                        log::warn!(target: "verificator", "ShardTopBlockDescr for {} skipped (due to SMFT)", top_block_id);
+                        continue;
+                    }
+                }
+            }
+
             let result = sh_bd.prevalidate(
                 mc_data.state().block_id(),
                 mc_data.state(),
