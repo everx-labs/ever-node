@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.60.11
+
+- Decreased error severity for wrong REMP blocks enumeration
+
 ## Version 0.60.10
 
 - SMFT arbitrage

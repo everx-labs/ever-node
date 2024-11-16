@@ -527,8 +527,8 @@ impl RempCatchain {
         match pld {
             Ok(::ton_api::ton::validator_session::BlockUpdate::ValidatorSession_BlockUpdate(pld)) => {
                 if let Some(prev) = self.instance.received_payloads.insert((pld.state, source_idx), SystemTime::now()) {
-                    log::error!(target: "remp", "Point 4. RMQ {}: payload {} from {} was already received at {:?}", self, pld.state, source_idx, prev);
-                    return
+                    log::trace!(target: "remp", "Point 4. RMQ {}: payload {} from {} was already received at {:?}", self, pld.state, source_idx, prev);
+                    //return
                 }
 
                 #[cfg(feature = "telemetry")]
