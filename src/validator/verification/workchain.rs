@@ -66,6 +66,14 @@ struct WorkchainDeliveryParams {
     config_params: SmftParams,                       //configuration parameters
 }
 
+pub(crate) struct BlockStatusDesc {
+    pub is_delivered: bool,
+    pub is_approved: bool,
+    pub has_rejections: bool,
+    #[allow(dead_code)]
+    pub has_approvals: bool,
+}
+
 pub struct Workchain {
     engine: EnginePtr,                    //pointer to engine
     runtime: tokio::runtime::Handle,      //runtime handle for spawns
@@ -695,13 +703,14 @@ impl Workchain {
         let life_time = block.get_first_appearance_time().elapsed().unwrap_or(Duration::from_secs(0)).as_secs_f64();
         let delivered_weight = block.get_deliveries_signature().get_total_weight(&self.wc_validators);
 
-        format!("({:6.2}%): {}{}{}{}{}{} | delivery_latency={:.3}s, lifetime={:.3}s, hops={:2}, acks={:?}, nacks={:?}, stats={:?}, id={}\n",
+        format!("({:6.2}%): {}{}{}{}{}{}{} | delivery_latency={:.3}s, lifetime={:.3}s, hops={:2}, acks={:?}, nacks={:?}, stats={:?}, id={}\n",
             delivered_weight as f64 / self.wc_total_weight as f64 * 100.0,
             if block.is_delivered(&self.wc_validators, delivery_params.wc_cutoff_weight) { " " } else { "↔" },
             if block.is_sent_to_mc() { "↑" } else { " " },
             if block.is_delivered_and_received_from_mc() { "↓" } else { " " },
-            if block.is_rejected() { "N" } else { " "},
+            if block.has_rejections() { "N" } else { " "},
             if block.has_approves() { "A" } else { " " },
+            if block.is_approved(&self.wc_validators, delivery_params.wc_cutoff_weight) { "+" } else { " " },
             if block.is_synchronizing(Duration::from_millis(config_params.block_sync_lifetime_period_ms as u64)) { "S" } else { " " },
             if let Some(state_change_time) = block.get_delivery_state_change_time() { 
                 if let Some(creation_time) = block.get_creation_time() {
@@ -764,20 +773,34 @@ impl Workchain {
     */
 
     /// Block status (delivered, rejected)
-    pub fn get_block_status(&self, block: &BlockPtr) -> (bool, bool) {
+    pub fn get_block_status(&self, block: &BlockPtr) -> BlockStatusDesc {
         let block = block.lock();
         let wc_cutoff_weight = self.get_wc_cutoff_weight();   
         let is_delivered = block.is_delivered(&self.wc_validators, wc_cutoff_weight);
-        let is_rejected = block.is_rejected();
+        let has_approvals = block.has_approves();
+        let has_rejections = block.has_rejections();
+        let is_approved = block.is_approved(&self.wc_validators, wc_cutoff_weight);
 
-        (is_delivered, is_rejected)
+        BlockStatusDesc {
+            is_delivered,
+            has_rejections,
+            has_approvals,
+            is_approved,
+        }
     }
 
     /// Should block be sent to MC
     fn should_send_to_mc(&self, block: &BlockPtr) -> bool {
-        let (is_delivered, is_rejected) = self.get_block_status(block);
+        let block_status_desc = self.get_block_status(block);
 
-        is_rejected || is_delivered
+        /*
+            Send to MC if:
+              1) block is delivered (more than cutoff number of nodes received it)
+              2) block has at least one NACK
+              3) block has more than cutoff number of approvals
+        */
+
+        block_status_desc.has_rejections || block_status_desc.is_approved || block_status_desc.is_delivered
     }
 
     /// Get block by its ID
@@ -846,7 +869,8 @@ impl Workchain {
 
                 //initiate verification of the block
 
-                self.verify_block(block_id, block_candidate);
+                let force_verify = false;
+                self.verify_block(&block, force_verify);
             }
         }
 
@@ -1082,47 +1106,32 @@ impl Workchain {
                         //do not answer for internal WC messages; far neighbours update approach will update WC soon
 
                         let delivery_params = self.workchain_delivery_params.lock().clone();
+                        let block_status_desc = self.get_block_status(&block);
+                        let is_approved = block_status_desc.is_approved;
+                        let is_delivered = block_status_desc.is_delivered;
 
-                        let is_delivered = block.lock().is_delivered(&self.wc_validators, delivery_params.wc_cutoff_weight);
+                        if is_approved {
+                            //check if block is approved and should be sent to MC
+
+                            let source_node_approved_weight = approvals_signature.get_total_weight(&self.wc_validators);
+                            let is_approved_on_other_node = source_node_approved_weight >= self.get_wc_cutoff_weight();
+
+                            if !is_approved_on_other_node {
+                                //send back to MC blocks which are approved for this node and not approved on MC node
+
+                                self.send_block_status_back_to_mc_node(&block, source_node_adnl_id, &delivery_params);
+                            }
+                        }
 
                         if is_delivered {
+                            //check if block should awake for delivery
+
                             let is_delivered_on_other_node = source_node_delivery_weight >= self.get_wc_cutoff_weight();
 
                             if !is_delivered_on_other_node {
                                 //send back to MC only blocks which are delivered for this node and not delivered on MC node
 
-                                if let Some(source_mc_node_idx) = self.get_mc_validator_idx_by_adnl_id(source_node_adnl_id) {
-                                    //send back delivered blocks to MC only
-
-                                    let next_allowed_send_back_time = match block.lock().get_mc_node_status_sent_time(source_mc_node_idx) {
-                                        Some(last_send_back_time) => last_send_back_time + Duration::from_millis(delivery_params.config_params.mc_allowed_force_delivery_delay_ms as u64),
-                                        None => SystemTime::now(),
-                                    };
-
-                                    if next_allowed_send_back_time.elapsed().is_ok() {
-                                        //manage timeout between sends
-
-                                        if log_enabled!(log::Level::Debug)
-                                        {        
-                                            log::debug!(target: "verificator", "Block {:?} status was sent back to MC overlay node [{}]={} in workchain {}. BlockInfo: delivery={}",
-                                                block_id,
-                                                source_mc_node_idx,
-                                                source_node_adnl_id,
-                                                self.node_debug_id,
-                                                self.get_readable_block_info(&block));
-                                        }
-                
-                                        self.send_block_status_to_mc_node(&block, source_mc_node_idx);                                        
-                                    } else {
-                                        log::trace!(target: "verificator", "Block {:?} status is not sent back to MC overlay node [{}]={} in workchain {} because of timeout (next allowed send time is in {:.3}s)",
-                                            block_id,
-                                            source_mc_node_idx,
-                                            source_node_adnl_id,
-                                            self.node_debug_id,
-                                            next_allowed_send_back_time.duration_since(SystemTime::now()).unwrap_or(Duration::from_secs(0)).as_secs_f64(),
-                                        );
-                                    }
-                                }
+                                self.send_block_status_back_to_mc_node(&block, source_node_adnl_id, &delivery_params);
                             }
                         } else {
                             //awake block synchronization to deliver block to MC if syncrhonization phase is finished
@@ -1155,11 +1164,26 @@ impl Workchain {
             }
         }
 
+        //check if arbitrage is needed
+
+        let has_rejections = block.lock().has_rejections();
+        if has_rejections && self.wc_local_idx != -1 {
+            let is_rejected_by_this_node = block.lock().is_rejected_by_node(self.wc_local_idx as usize);
+
+            if !is_rejected_by_this_node {
+                //initiate verification of the block
+
+                let force_verify = true;
+                self.verify_block(&block, force_verify);
+            }
+        }
+
         //compute latency for MC deliveries
 
         if !received_from_workchain {
             let was_mc_processed = block.lock().was_mc_processed();
-            let (is_delivered, _) = self.get_block_status(&block);
+            let block_status_desc = self.get_block_status(&block);
+            let is_delivered = block_status_desc.is_delivered;
 
             self.block_status_received_in_mc_counter.total_increment();
 
@@ -1198,6 +1222,42 @@ impl Workchain {
         self.send_block_status(&block, received_from_workchain, send_immediately_to_mc);
 
         block
+    }
+
+    /// Send block status back to MC node
+    fn send_block_status_back_to_mc_node(&self, block: &BlockPtr, source_node_adnl_id: &PublicKeyHash, delivery_params: &WorkchainDeliveryParams) {
+        if let Some(source_mc_node_idx) = self.get_mc_validator_idx_by_adnl_id(source_node_adnl_id) {
+            //send back delivered blocks to MC only
+
+            let next_allowed_send_back_time = match block.lock().get_mc_node_status_sent_time(source_mc_node_idx) {
+                Some(last_send_back_time) => last_send_back_time + Duration::from_millis(delivery_params.config_params.mc_allowed_force_delivery_delay_ms as u64),
+                None => SystemTime::now(),
+            };
+            let block_id = block.lock().get_id().clone();
+
+            if next_allowed_send_back_time.elapsed().is_ok() {
+                //manage timeout between sends
+
+                if log_enabled!(log::Level::Debug) {
+                    log::debug!(target: "verificator", "Block {:?} status was sent back to MC overlay node [{}]={} in workchain {}. BlockInfo: delivery={}",
+                        block_id,
+                        source_mc_node_idx,
+                        source_node_adnl_id,
+                        self.node_debug_id,
+                        self.get_readable_block_info(&block));
+                }
+
+                self.send_block_status_to_mc_node(&block, source_mc_node_idx);
+            } else {
+                log::trace!(target: "verificator", "Block {:?} status is not sent back to MC overlay node [{}]={} in workchain {} because of timeout (next allowed send time is in {:.3}s)",
+                    block_id,
+                    source_mc_node_idx,
+                    source_node_adnl_id,
+                    self.node_debug_id,
+                    next_allowed_send_back_time.duration_since(SystemTime::now()).unwrap_or(Duration::from_secs(0)).as_secs_f64(),
+                );
+            }
+        }
     }
 
     /// Set blocks status (delivered - None, ack - Some(true), nack - Some(false))
@@ -1247,7 +1307,7 @@ impl Workchain {
         external_request_time: Option<std::time::SystemTime>,
         delivery_state_change_time: Option<std::time::SystemTime>,
     ) {
-        let (should_update_delivery_metrics, is_first_time_external_request, has_approves, is_rejected, is_delivered, latency) = {
+        let (should_update_delivery_metrics, is_first_time_external_request, has_approves, has_rejections, is_delivered, latency) = {
             let mut block = block.lock();
             let wc_cutoff_weight = self.get_wc_cutoff_weight();
             let is_delivered = block.is_delivered(&self.wc_validators, wc_cutoff_weight);
@@ -1279,7 +1339,7 @@ impl Workchain {
             let should_update_delivery_metrics =  block.get_first_external_request_time().is_some() && block.get_delivery_state_change_time().is_some() &&
                 (is_first_time_external_request || is_delivery_state_changed);
 
-            (should_update_delivery_metrics, is_first_time_external_request, block.has_approves(), block.is_rejected(), is_delivered, latency)
+            (should_update_delivery_metrics, is_first_time_external_request, block.has_approves(), block.has_rejections(), is_delivered, latency)
         };
 
         if is_first_time_external_request {
@@ -1294,7 +1354,7 @@ impl Workchain {
             self.external_request_delivered_blocks_counter.increment(1);
         }
 
-        if is_rejected {
+        if has_rejections {
             self.external_request_rejected_blocks_counter.increment(1);
         }
 
@@ -1469,7 +1529,7 @@ impl Workchain {
     }
 
     /// Start force block delivery flow
-    pub fn start_force_block_delivery(&self, block_id: &BlockIdExt) {
+    pub fn start_force_block_delivery(&self, block_id: &BlockIdExt, request_all: bool) {
         let block_status = self.add_block_impl(block_id, None);
         let mut block = block_status.lock();
         let last_block_force_delivery_time = block.get_last_block_force_delivery_request_time();
@@ -1511,7 +1571,11 @@ impl Workchain {
 
             //calculate number of workchain nodes for force delivery request
 
-            let request_nodes_count = std::cmp::max(1, (workchain.wc_validators.len() as f64 / workchain.mc_validators.len() as f64 * force_delivery_duplication_factor) as usize);
+            let request_nodes_count = if request_all {
+                workchain.wc_validators.len()
+            } else {
+                std::cmp::max(1, (workchain.wc_validators.len() as f64 / workchain.mc_validators.len() as f64 * force_delivery_duplication_factor) as usize)
+            };
 
             //request block delivery from several workchain nodes
 
@@ -1661,6 +1725,18 @@ impl Workchain {
 
     /// Generate random list of workchain validators
     fn generate_random_wc_validators(&self, count: usize) -> Vec<usize> {
+        if count >= self.wc_validators.len() {
+            let mut validators = Vec::with_capacity(count);
+
+            for i in 0..self.wc_validators.len() {
+                if i != self.wc_local_idx as usize {
+                    validators.push(i);
+                }
+            }
+
+            return validators;
+        }
+
         //TODO: remove duplicate sends? (maybe)
         let mut rng = rand::thread_rng();
         let mut validators = Vec::with_capacity(count);
@@ -1816,13 +1892,34 @@ impl Workchain {
         false //can't verify without secret BLS key
     }
 
-    fn verify_block(&self, block_id: &BlockIdExt, block_candidate: Arc<BlockCandidateBody>) {
-        trace!(target: "verificator", "Verifying block candidate {} (node={})", block_id, self.node_debug_id);
+    fn verify_block(&self, block: &BlockPtr, force_verify: bool) {
+        let (block_id, block_candidate) = {
+            let block = block.lock();
+            (block.get_id().clone(), block.get_block_candidate().clone())
+        };
 
-        if !self.should_verify(block_id) {
+        if block_candidate.is_none() {
+            log::warn!(target: "verificator", "Block candidate {:?} is not loaded for verification (node={})", block_id, self.node_debug_id);
+            return;
+        }
+        let block_candidate = block_candidate.unwrap();
+
+        if !force_verify && !self.should_verify(&block_id) {
             trace!(target: "verificator", "Skipping verification of block candidate {} (node={})", block_id, self.node_debug_id);
             return;
         }
+
+        {
+            let mut block = block.lock();
+
+            if block.is_verification_initiated() {
+                return;
+            }
+
+            block.set_verification_initiated();
+        }
+
+        trace!(target: "verificator", "Verifying block candidate {} (node={})", block_id, self.node_debug_id);
 
         self.verify_block_counter.total_increment();
 
@@ -1869,16 +1966,6 @@ impl Workchain {
         if !verification_status {
             error!(target: "verificator", "Malicios block candidate {:?} detected (node={})", block_id, self.node_debug_id);
         }
-    }
-
-    /*
-        Arbitrage
-    */
-
-    pub fn start_arbitrage(&self, block_id: &BlockIdExt) {
-        log::warn!(target: "verificator", "Arbitrage for block candidate {:?} (node={})", block_id, self.node_debug_id);
-
-        //TODO: arbitrage implementation
     }
 
     /*

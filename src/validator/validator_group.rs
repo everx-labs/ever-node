@@ -55,7 +55,7 @@ use crate::validator::reliable_message_queue::RempQueueCollatorInterfaceImpl;
 #[cfg(feature = "slashing")]
 use crate::validator::slashing::SlashingManagerPtr;
 //#[cfg(feature = "fast_finality")]
-use crate::validator::validator_utils::PrevBlockHistory;
+use crate::validator::validator_utils::{construct_remp_catchain_options_from_config, PrevBlockHistory};
 // #[cfg(feature = "fast_finality")]
 // use crate::validator::workchains_fast_finality::compute_actual_finish;
 
@@ -202,6 +202,7 @@ impl ValidatorGroupImpl {
                     g.engine.clone(), remp_manager.clone(), g.shard().clone(),
                     &g.local_key
                 );
+                let remp_catchain_options = construct_remp_catchain_options_from_config(&g.config);
                 if let Err(error) = rq.set_queues(
                     g.general_session_info.clone(),
                     g.validator_list_id.clone(),
@@ -216,7 +217,7 @@ impl ValidatorGroupImpl {
 
                 let local_key = g.local_key.clone();
                 rt.clone().spawn(async move {
-                    match reliable_queue_clone.start(local_key).await {
+                    match reliable_queue_clone.start(local_key, &remp_catchain_options).await {
                         Ok(()) => (),
                         Err(e) => log::error!(target: "validator", "Cannot start RMQ {}: {}",
                            reliable_queue_clone.info_string().await, e
@@ -460,6 +461,7 @@ impl ValidatorGroup {
 
         if let Some(rmq) = rmq {
             log::debug!(target: "validator", "Adding next validators (add_new_queue) {}", self.info().await);
+
             rmq.add_new_queue(
                 next_master_cc_range,
                 prev_validators,
@@ -473,11 +475,18 @@ impl ValidatorGroup {
         Ok(())
     }
 
-    pub async fn stop(self: Arc<ValidatorGroup>, rt: tokio::runtime::Handle, new_master_cc_range: Option<RangeInclusive<u32>>) -> Result<()> {
+    pub async fn stop(
+        self: Arc<ValidatorGroup>,
+        rt: tokio::runtime::Handle,
+        new_master_cc_range: Option<RangeInclusive<u32>>,
+        new_session_options: Option<&validator_session::SessionOptions>,
+        destroy_database: bool
+    ) -> Result<()> {
         self.set_status(ValidatorGroupStatus::Stopping).await?;
-        log::debug!(target: "validator", "Stopping group: {}", self.info().await);
+        log::info!(target: "validator", "Stopping group: {} (destroy database {})", self.info().await, destroy_database);
         let group_impl = self.group_impl.clone();
         let self_clone = self.clone();
+        let new_remp_catchain_options = new_session_options.map(|opt| construct_remp_catchain_options_from_config(opt));
         rt.spawn({
             async move {
                 log::debug!(target: "validator", "Stopping group (spawn): {}", self_clone.info().await);
@@ -487,9 +496,9 @@ impl ValidatorGroup {
                     ).await;
                 if let Some(rmq) = reliable_message_queue {
                     log::debug!(target: "validator", "Stopping group (spawn) {}, rmq: {}", self_clone.info().await, rmq);
-                    if let Some(new_cc_range) = new_master_cc_range {
+                    if let (Some(new_cc_range), Some(new_remp_cc_opts)) = (new_master_cc_range, new_remp_catchain_options) {
                         log::debug!(target: "validator", "Forwarding messages, rmq: {}, new cc range: {:?}", rmq, new_cc_range);
-                        rmq.forward_messages(&new_cc_range, self_clone.local_key.clone()).await;
+                        rmq.forward_messages(&new_cc_range, self_clone.local_key.clone(), &new_remp_cc_opts).await;
                         log::debug!(target: "validator", "Messages forwarded, rmq: {}, new cc range: {:?}", rmq, new_cc_range);
                     }
                 }
@@ -500,8 +509,13 @@ impl ValidatorGroup {
                 log::debug!(target: "validator", "Group stopped: {}", self_clone.info().await);
                 let _ = self_clone.set_status(ValidatorGroupStatus::Stopped).await;
                 log::info!(target: "validator", "Status set: {}", self_clone.info().await);
-                let _ = self_clone.destroy_db().await;
-                log::debug!(target: "validator", "Db destroyed: {}", self_clone.info().await);
+                if destroy_database {
+                    let _ = self_clone.destroy_db().await;
+                    log::debug!(target: "validator", "Db destroyed: {}", self_clone.info().await);
+                }
+                else {
+                    log::debug!(target: "validator", "Db destroy skipped (destroy_databse option set to false): {}", self_clone.info().await);
+                }
             }
         });
         log::debug!(target: "validator", "Stopping group {}, stop spawned", self.info().await);
@@ -650,6 +664,7 @@ impl ValidatorGroup {
                     self.local_key.clone(),
                     self.validator_set.clone(),
                     self.engine.clone(),
+                    self.verification_manager.clone(),
                 ).await {
                     Ok(b) => Ok(Arc::new(b)),
                     Err(x) => Err(x)

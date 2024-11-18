@@ -168,10 +168,11 @@ impl MessageQueue {
     }
 
     pub async fn create_and_start(
-        engine: Arc<dyn EngineOperations>, manager: Arc<RempManager>, info: Arc<RempCatchainInfo>, local_key: PrivateKey
+        engine: Arc<dyn EngineOperations>, manager: Arc<RempManager>, info: Arc<RempCatchainInfo>, local_key: PrivateKey,
+        catchain_options: &catchain::Options
     ) -> Result<Arc<Self>> {
         let queue = Arc::new(Self::create(engine, manager, info)?);
-        queue.clone().start(local_key.clone()).await?;
+        queue.clone().start(local_key.clone(), catchain_options).await?;
         Ok(queue)
     }
 
@@ -227,12 +228,12 @@ impl MessageQueue {
         }
     }
 
-    pub async fn start(self: Arc<MessageQueue>, local_key: PrivateKey) -> Result<()> {
+    pub async fn start(self: Arc<MessageQueue>, local_key: PrivateKey, catchain_options: &catchain::Options) -> Result<()> {
         self.set_queue_status(MessageQueueStatus::Created, MessageQueueStatus::Starting).await?;
         log::trace!(target: "remp", "RMQ {}: starting", self);
 
         let catchain_instance_res = self.remp_manager.catchain_store.start_catchain(
-            self.engine.clone(), self.remp_manager.clone(), self.catchain_info.clone(), local_key
+            self.engine.clone(), self.remp_manager.clone(), self.catchain_info.clone(), catchain_options, local_key
         ).await;
 
         match catchain_instance_res {
@@ -1073,7 +1074,7 @@ impl RmqQueueManager {
         Ok(())
     }
 
-    pub async fn forward_messages(&self, new_cc_range: &RangeInclusive<u32>, local_key: PrivateKey) {
+    pub async fn forward_messages(&self, new_cc_range: &RangeInclusive<u32>, local_key: PrivateKey, next_catchain_options: &catchain::Options) {
         if !self.remp_manager.options.is_service_enabled() {
             return;
         }
@@ -1110,7 +1111,7 @@ impl RmqQueueManager {
                 log::debug!(target: "remp", "RMQ {}: Starting {}", self, info);
 
                 match MessageQueue::create_and_start(
-                    self.engine.clone(), self.remp_manager.clone(), info.clone(), local_key.clone()
+                    self.engine.clone(), self.remp_manager.clone(), info.clone(), local_key.clone(), next_catchain_options
                 ).await {
                     Err(e) => log::error!(
                         target: "remp",
@@ -1231,9 +1232,9 @@ impl RmqQueueManager {
         }
     }
 
-    pub async fn start(&self, local_key: PrivateKey) -> Result<()> {
+    pub async fn start(&self, local_key: PrivateKey, catchain_options: &catchain::Options) -> Result<()> {
         if let Some(cur_queue) = &self.cur_queue {
-            cur_queue.clone().start(local_key).await
+            cur_queue.clone().start(local_key, catchain_options).await
         }
         else {
             log::warn!(target: "remp", "Cannot start RMQ queue for {} -- no current queue",

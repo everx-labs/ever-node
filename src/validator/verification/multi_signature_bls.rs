@@ -121,6 +121,11 @@ impl MultiSignature {
         self.signature.is_empty()
     }
 
+    /// Check if node signature is present
+    pub fn is_signed_by_node(&self, idx: usize) -> bool {
+        self.nodes.contains(&(idx as u16))
+    }
+
     /// Total weight
     pub fn get_total_weight(&self, validators: &[ValidatorDescr]) -> ValidatorWeight {
         let mut total_weight = 0;

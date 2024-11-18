@@ -605,6 +605,21 @@ pub async fn get_block_info_by_id(engine: Arc<dyn EngineOperations>, mc_block_id
     Ok((info, tops))
 }
 
+pub fn construct_remp_catchain_options_from_config(config: &validator_session::SessionOptions) -> catchain::Options {
+    catchain::Options {
+        idle_timeout: config.catchain_idle_timeout,
+        max_deps: config.catchain_max_deps,
+        skip_processed_blocks: config.catchain_skip_processed_blocks,
+        debug_disable_db: false,
+        receiver_max_neighbours_count: config.catchain_receiver_max_neighbours_count,
+        receiver_neighbours_sync_min_period: config.catchain_receiver_neighbours_sync_min_period,
+        receiver_neighbours_sync_max_period: config.catchain_receiver_neighbours_sync_max_period,
+        receiver_max_sources_sync_attempts: config.catchain_receiver_max_sources_sync_attempts,
+        receiver_neighbours_rotate_min_period: config.catchain_receiver_neighbours_rotate_min_period,
+        receiver_neighbours_rotate_max_period: config.catchain_receiver_neighbours_rotate_max_period,
+    }
+}
+
 /// Lock-free map to small set (small set means 1-10 records in one typical map cell)
 pub struct LockfreeMapSet<K, V> where V: Ord, V: Clone+Debug, K: Clone+Hash+Ord+Debug {
     map: dashmap::DashMap<K,Vec<V>>
