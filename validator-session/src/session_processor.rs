@@ -687,9 +687,7 @@ impl SessionProcessor for SessionProcessorImpl {
                 let block_processing_latency = get_elapsed_time(&block.get_creation_time());
                 let delivery_issue = block_processing_latency < BLOCK_PROCESSING_WARN_LATENCY;
 
-                if !delivery_issue {
-                    force_batching_mode = true; //ask catchain to batch blocks in case of overloaded session incoming queues
-                }
+                force_batching_mode = true; //ask catchain to batch blocks in case of overloaded session incoming queues
 
                 let warn_elapsed = get_elapsed_time(&self.last_process_blocks_warn_dump_time);
 

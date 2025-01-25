@@ -1703,7 +1703,9 @@ impl CatchainProcessor {
             log::trace!("Catchain forcing creation of a new block");
         }
 
-        if self.active_process {
+        let is_requested_time_expired = SystemTime::now().duration_since(time).is_ok();
+
+        if self.active_process && is_requested_time_expired {
             self.force_process = true;
         } else {
             self.set_next_block_generation_time(time);

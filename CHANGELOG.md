@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.60.14
+
+- Deliver catchain fork info to node
+
+## Version 0.60.13
+
+- Tuning catchain performance
+
+## Version 0.60.12
+
+- Fixed possible zero division in cells db telemetry
+
 ## Version 0.60.11
 
 - Decreased error severity for wrong REMP blocks enumeration
