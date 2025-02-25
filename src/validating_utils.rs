@@ -62,7 +62,7 @@ pub fn supported_capabilities() -> u64 {
 }
 
 pub fn supported_version() -> u32 {
-    59
+    60
 }
 
 #[allow(clippy::too_many_arguments)]
