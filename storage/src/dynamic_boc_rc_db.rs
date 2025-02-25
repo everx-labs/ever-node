@@ -249,11 +249,14 @@ impl DynamicBocDb {
                     tx.blocking_send((key, value))?;
                     read += 1;
                     if read % 1_000_000 == 0 {
-                        log::info!(
-                            target: TARGET,
-                            "Cells DB migration: read {} items, speed {} items/sec",
-                            read, read / now.elapsed().as_secs()
-                        );
+                        let sec = now.elapsed().as_secs();
+                        if sec != 0 {
+                            log::info!(
+                                target: TARGET,
+                                "Cells DB migration: read {} items, speed {} items/sec",
+                                read, read / sec
+                            );
+                        }
                     }
                 }
 
@@ -399,8 +402,10 @@ impl DynamicBocDb {
         let now3 = Instant::now();
         self.db.write(transaction)?;
         #[cfg(feature = "telemetry")]
-        self.telemetry.boc_db_element_write_nanos.update(
-            now.elapsed().as_nanos() as u64 / (visited.len() as u64 + created as u64));
+        if !visited.is_empty() {
+            self.telemetry.boc_db_element_write_nanos.update(
+                now.elapsed().as_nanos() as u64 / (visited.len() as u64 + created as u64));
+        }
 
         log::debug!(
             target: TARGET,
@@ -522,7 +527,8 @@ impl DynamicBocDb {
         self.db.write(transaction)?;
 
         let updated = visited.len() - deleted;
-        #[cfg(feature = "telemetry")] {
+        #[cfg(feature = "telemetry")] 
+        if !visited.is_empty() {
             self.telemetry.deleted_cells_speed.update(deleted as u64);
             self.telemetry.updated_cells_speed.update(updated as u64);
             self.telemetry.boc_db_element_write_nanos.update(

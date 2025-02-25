@@ -14,7 +14,7 @@
 use crate::network::node_network::NetworkContext;
 
 use adnl::{
-    declare_counted, OverlayNode, PrivateOverlayShortId, RldpNode,
+    declare_counted, CatchainData, OverlayNode, PrivateOverlayShortId, RldpNode,
     common::{
         AdnlPeers, Answer, CountedObject, Counter, QueryAnswer, QueryResult, 
         Subscriber, TaggedByteSlice, TaggedTlObject, Wait
@@ -342,16 +342,22 @@ impl CatchainClient {
             };
             let message = receiver.wait_for_catchain(overlay_id).await;
             match message {
-                Ok(Some((catchain_block_update, validator_session_block_update, source_id)))  => {
-                    log::trace!(target: Self::TARGET, "private overlay broadcast ValidatorSession_BlockUpdate (successed)");
-                    let vs_block_update = validator_session_block_update.into_boxed();
-                    let block_update = catchain_block_update.into_boxed();
+                Ok(Some((catchain_block_update, inner_update, source_id)))  => {
+                    log::trace!(
+                        target: Self::TARGET, 
+                        "private overlay broadcast ValidatorSession_BlockUpdate (successed)"
+                    );
                     if let Some(listener) = catchain_listener.upgrade() {
-                                let mut data: catchain::RawBuffer = catchain::RawBuffer::default();
-                                let mut serializer = ton_api::Serializer::new(&mut data);
-                                serializer.write_boxed(&block_update)?;
-                                serializer.write_boxed(&vs_block_update)?;
-                                let data = catchain::CatchainFactory::create_block_payload(data);
+                        let mut data: catchain::RawBuffer = catchain::RawBuffer::default();
+                        let mut serializer = ton_api::Serializer::new(&mut data);
+                        serializer.write_boxed(&catchain_block_update.into_boxed())?;
+                        match inner_update {
+                            CatchainData::Catchain(upd) =>
+                                serializer.write_boxed(&upd.into_boxed())?,
+                            CatchainData::ValidatorSession(upd) =>
+                                serializer.write_boxed(&upd.into_boxed())?
+                        };
+                        let data = catchain::CatchainFactory::create_block_payload(data);
                         listener
                             .on_message(
                                 source_id,
