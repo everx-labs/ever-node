@@ -6,7 +6,13 @@ Everscale/Venom node and validator with tools
 
 - [About](#about)
 - [Getting Started](#getting-started)
-- [Usage](#usage)
+- [Everscale/Venom Node Usage](#everscale/venom-node-usage)
+- [Everscale/Venom Console Usage](#everscale/venom-console-usage)
+- [Zerostate tool](#zerostate-tool)
+- [Keygen tool](#keygen-tool)
+- [Gendht tool](#gendht-tool)
+- [Dhtscan tool](#dhtscan-tool)
+- [Print tool](#print-tool)
 - [Contributing](#contributing)
 - [License](#license)
 
